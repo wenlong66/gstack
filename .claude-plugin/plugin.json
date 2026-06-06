@@ -1,21 +1,23 @@
 {
   "name": "gstack",
-  "owner": {
+  "description": "Garry's Stack — Claude Code skills plus fast browser automation for AI-assisted engineering workflows.",
+  "version": "1.55.1.0",
+  "author": {
     "name": "Garry Tan",
     "url": "https://github.com/garrytan"
   },
-  "metadata": {
-    "description": "Garry's Stack — Claude Code skills plus fast browser automation for AI-assisted engineering workflows.",
-    "homepage": "https://github.com/garrytan/gstack"
-  },
-  "plugins": [
-    {
-      "name": "gstack",
-      "version": "1.55.1.0",
-      "source": ".claude",
-      "description": "Garry's Stack — Claude Code skills plus fast browser automation for AI-assisted engineering workflows.",
-      "homepage": "https://github.com/garrytan/gstack",
-      "license": "MIT"
-    }
+  "homepage": "https://github.com/garrytan/gstack#readme",
+  "repository": "https://github.com/garrytan/gstack",
+  "license": "MIT",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "plugin",
+    "skills",
+    "browser",
+    "automation",
+    "qa",
+    "review",
+    "ship"
   ]
 }

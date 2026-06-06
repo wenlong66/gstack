@@ -235,6 +235,7 @@ if [ "$PLUGIN_MODE" -eq 1 ]; then
   fi
   SKILL_PREFIX=1
   SKILL_PREFIX_FLAG=1
+  "$GSTACK_CONFIG" set skill_prefix true 2>/dev/null || true
   PLUGIN_OUTPUT_DIR="$(pwd -P)"
   if [ "$INSTALL_CLAUDE" -eq 1 ]; then
     INSTALL_SKILLS_DIR="$PLUGIN_OUTPUT_DIR/.claude/skills"
@@ -567,6 +568,7 @@ mkdir -p "$HOME/.gstack/projects"
 link_claude_skill_dirs() {
   local gstack_dir="$1"
   local skills_dir="$2"
+  local copy_mode="${3:-link}"
   local linked=()
   for skill_dir in "$gstack_dir"/*/; do
     if [ -f "$skill_dir/SKILL.md" ]; then
@@ -590,19 +592,27 @@ link_claude_skill_dirs() {
       if [ -L "$target" ]; then
         rm -f "$target"
       fi
-      # Create real directory with symlinked SKILL.md (absolute path)
-      # Use mkdir -p unconditionally (idempotent) to avoid TOCTOU race
+      # Create real directory with SKILL.md inside.
+      # Use mkdir -p unconditionally (idempotent) to avoid TOCTOU race.
+      # Plugin installs copy files so patching prefixed name: fields does not
+      # mutate the source repo's generated SKILL.md files.
       mkdir -p "$target"
-      # Validate target isn't a symlink before creating the link
-      if [ -L "$target/SKILL.md" ]; then rm "$target/SKILL.md"; fi
-      _link_or_copy "$gstack_dir/$dir_name/SKILL.md" "$target/SKILL.md"
-      # Link the sections/ subdir for carved skills (v2 plan T9). The prefixed
-      # Claude skill dir otherwise holds only SKILL.md, so a runtime
-      # "Read sections/<name>.md" 404s. Route through _link_or_copy so Windows
-      # gets a fresh copy (and re-copies on every ./setup, refreshing staleness).
+      if [ -L "$target/SKILL.md" ] || [ -e "$target/SKILL.md" ]; then rm -f "$target/SKILL.md"; fi
+      if [ "$copy_mode" = "copy" ]; then
+        cp -f "$gstack_dir/$dir_name/SKILL.md" "$target/SKILL.md"
+      else
+        _link_or_copy "$gstack_dir/$dir_name/SKILL.md" "$target/SKILL.md"
+      fi
+      # Link or copy the sections/ subdir for carved skills (v2 plan T9). The
+      # prefixed Claude skill dir otherwise holds only SKILL.md, so a runtime
+      # "Read sections/<name>.md" 404s.
       if [ -d "$gstack_dir/$dir_name/sections" ]; then
         if [ -e "$target/sections" ] || [ -L "$target/sections" ]; then rm -rf "$target/sections"; fi
-        _link_or_copy "$gstack_dir/$dir_name/sections" "$target/sections"
+        if [ "$copy_mode" = "copy" ]; then
+          cp -R "$gstack_dir/$dir_name/sections" "$target/sections"
+        else
+          _link_or_copy "$gstack_dir/$dir_name/sections" "$target/sections"
+        fi
       fi
       linked+=("$link_name")
     fi
@@ -1067,18 +1077,24 @@ if [ "$INSTALL_CLAUDE" -eq 1 ]; then
     else
       cleanup_prefixed_claude_symlinks "$SOURCE_GSTACK_DIR" "$INSTALL_SKILLS_DIR"
     fi
-    # Patch name: fields BEFORE creating symlinks so link_claude_skill_dirs
-    # reads the correct (patched) name: values for symlink naming
+    if [ "$PLUGIN_MODE" -eq 1 ]; then
+      "$SOURCE_GSTACK_DIR/bin/gstack-patch-names" "$SOURCE_GSTACK_DIR" 0
+      link_claude_skill_dirs "$SOURCE_GSTACK_DIR" "$INSTALL_SKILLS_DIR" copy
+      "$SOURCE_GSTACK_DIR/bin/gstack-patch-names" "$INSTALL_SKILLS_DIR" "$SKILL_PREFIX"
+    else
+      # Patch name: fields BEFORE creating symlinks so link_claude_skill_dirs
+      # reads the correct (patched) name: values for symlink naming.
       "$SOURCE_GSTACK_DIR/bin/gstack-patch-names" "$SOURCE_GSTACK_DIR" "$SKILL_PREFIX"
-    link_claude_skill_dirs "$SOURCE_GSTACK_DIR" "$INSTALL_SKILLS_DIR"
-    link_claude_root_skill_alias "$SOURCE_GSTACK_DIR" "$INSTALL_SKILLS_DIR"
-    # Self-healing: re-run gstack-relink to ensure name: fields and directory
-    # names are consistent with the config. This catches cases where an interrupted
-    # setup, stale git state, or gen:skill-docs left name: fields out of sync.
-    GSTACK_RELINK="$SOURCE_GSTACK_DIR/bin/gstack-relink"
-    if [ -x "$GSTACK_RELINK" ]; then
-      GSTACK_SKILLS_DIR="$INSTALL_SKILLS_DIR" GSTACK_INSTALL_DIR="$SOURCE_GSTACK_DIR" "$GSTACK_RELINK" >/dev/null 2>&1 || true
+      link_claude_skill_dirs "$SOURCE_GSTACK_DIR" "$INSTALL_SKILLS_DIR"
+      # Self-healing: re-run gstack-relink to ensure name: fields and directory
+      # names are consistent with the config. This catches cases where an interrupted
+      # setup, stale git state, or gen:skill-docs left name: fields out of sync.
+      GSTACK_RELINK="$SOURCE_GSTACK_DIR/bin/gstack-relink"
+      if [ -x "$GSTACK_RELINK" ]; then
+        GSTACK_SKILLS_DIR="$INSTALL_SKILLS_DIR" GSTACK_INSTALL_DIR="$SOURCE_GSTACK_DIR" "$GSTACK_RELINK" >/dev/null 2>&1 || true
+      fi
     fi
+    link_claude_root_skill_alias "$SOURCE_GSTACK_DIR" "$INSTALL_SKILLS_DIR"
     # Backwards-compat alias: /connect-chrome → /open-gstack-browser
     _OGB_LINK="$INSTALL_SKILLS_DIR/connect-chrome"
     if [ "$SKILL_PREFIX" -eq 1 ]; then

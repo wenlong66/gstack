@@ -1,0 +1,21 @@
+{
+  "name": "gstack",
+  "owner": {
+    "name": "Garry Tan",
+    "url": "https://github.com/garrytan"
+  },
+  "metadata": {
+    "description": "Garry's Stack — Claude Code skills plus fast browser automation for AI-assisted engineering workflows.",
+    "homepage": "https://github.com/garrytan/gstack"
+  },
+  "plugins": [
+    {
+      "name": "gstack",
+      "version": "1.55.1.0",
+      "source": ".claude",
+      "description": "Garry's Stack — Claude Code skills plus fast browser automation for AI-assisted engineering workflows.",
+      "homepage": "https://github.com/garrytan/gstack",
+      "license": "MIT"
+    }
+  ]
+}

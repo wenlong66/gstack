@@ -1,0 +1,42 @@
+{
+  "name": "gstack",
+  "version": "1.55.1.0",
+  "description": "Garry's Stack — Claude Code skills plus fast browser automation for AI-assisted engineering workflows.",
+  "author": {
+    "name": "Garry Tan",
+    "url": "https://github.com/garrytan"
+  },
+  "homepage": "https://github.com/garrytan/gstack#readme",
+  "repository": "https://github.com/garrytan/gstack",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "plugin",
+    "skills",
+    "browser",
+    "automation",
+    "qa",
+    "review",
+    "ship"
+  ],
+  "skills": "./.agents/skills",
+  "interface": {
+    "displayName": "gstack",
+    "shortDescription": "AI engineering workflow skills plus fast browser automation.",
+    "longDescription": "gstack packages product planning, engineering review, browser QA, security audit, documentation, release, and deployment workflows as reusable AI coding skills, backed by a fast Playwright browser CLI for real page interaction.",
+    "developerName": "Garry Tan",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Interactive"
+    ],
+    "websiteURL": "https://github.com/garrytan/gstack",
+    "defaultPrompt": [
+      "Review this branch before I ship it",
+      "Run browser QA against my staging URL",
+      "Plan this feature with CEO, design, and engineering review"
+    ],
+    "brandColor": "#111827"
+  }
+}

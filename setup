@@ -82,7 +82,6 @@ SKILL_PREFIX=1
 SKILL_PREFIX_FLAG=0
 TEAM_MODE=0
 NO_TEAM_MODE=0
-PLUGIN_MODE=0
 PLAN_TUNE_HOOKS_MODE=""   # "" = resolve from env/config/prompt; "yes"/"no" = explicit
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -93,7 +92,6 @@ while [ $# -gt 0 ]; do
     --no-prefix) SKILL_PREFIX=0; SKILL_PREFIX_FLAG=1; shift ;;
     --team)    TEAM_MODE=1; shift ;;
     --no-team) NO_TEAM_MODE=1; shift ;;
-    --plugin) PLUGIN_MODE=1; shift ;;
     --plan-tune-hooks)    PLAN_TUNE_HOOKS_MODE="yes"; shift ;;
     --no-plan-tune-hooks) PLAN_TUNE_HOOKS_MODE="no"; shift ;;
     --plan-tune-hooks=*)  PLAN_TUNE_HOOKS_MODE="${1#--plan-tune-hooks=}"; shift ;;
@@ -142,7 +140,7 @@ case "$HOST" in
 esac
 
 # ─── Resolve skill prefix preference ─────────────────────────
-# Priority: CLI flag > saved config > interactive prompt (or prefixed default for non-TTY)
+# Priority: CLI flag > saved config > interactive prompt (or flat default for non-TTY)
 GSTACK_CONFIG="$SOURCE_GSTACK_DIR/bin/gstack-config"
 export GSTACK_SETUP_RUNNING=1  # Prevent gstack-config post-set hook from triggering relink mid-setup
 if [ "$SKILL_PREFIX_FLAG" -eq 0 ]; then
@@ -152,27 +150,27 @@ if [ "$SKILL_PREFIX_FLAG" -eq 0 ]; then
   elif [ "$_saved_prefix" = "false" ]; then
     SKILL_PREFIX=0
   else
-    # No saved preference — prompt interactively (or default prefixed for non-TTY/quiet)
+    # No saved preference — prompt interactively (or default flat for non-TTY/quiet)
     if [ "$QUIET" -eq 1 ]; then
-      SKILL_PREFIX=1
+      SKILL_PREFIX=0
     elif [ -t 0 ]; then
       echo ""
       echo "Skill naming: how should gstack skills appear?"
       echo ""
       echo "  1) Short names: /qa, /ship, /review"
-      echo "     Clean and fast to type."
+      echo "     Recommended. Clean and fast to type."
       echo ""
       echo "  2) Namespaced: /gstack-qa, /gstack-ship, /gstack-review"
-      echo "     Recommended if you run other skill packs alongside gstack to avoid conflicts."
+      echo "     Use this if you run other skill packs alongside gstack to avoid conflicts."
       echo ""
-      printf "Choice [1/2] (default: 2, auto-selects in 10s): "
+      printf "Choice [1/2] (default: 1, auto-selects in 10s): "
       read -t 10 -r _prefix_choice </dev/tty 2>/dev/null || _prefix_choice=""
       case "$_prefix_choice" in
-        1) SKILL_PREFIX=0 ;;
-        *) SKILL_PREFIX=1 ;;
+        2) SKILL_PREFIX=1 ;;
+        *) SKILL_PREFIX=0 ;;
       esac
     else
-      SKILL_PREFIX=1
+      SKILL_PREFIX=0
     fi
     # Save the choice for future runs
     "$GSTACK_CONFIG" set skill_prefix "$([ "$SKILL_PREFIX" -eq 1 ] && echo true || echo false)" 2>/dev/null || true
@@ -223,31 +221,6 @@ elif [ "$HOST" = "factory" ]; then
 elif [ "$HOST" = "opencode" ]; then
   INSTALL_OPENCODE=1
 fi
-
-if [ "$PLUGIN_MODE" -eq 1 ]; then
-  case "$HOST" in
-    claude|codex) ;;
-    *) echo "gstack setup failed: --plugin currently supports --host claude or --host codex only" >&2; exit 1 ;;
-  esac
-  if [ "$LOCAL_INSTALL" -eq 1 ] || [ "$TEAM_MODE" -eq 1 ] || [ "$NO_TEAM_MODE" -eq 1 ]; then
-    echo "gstack setup failed: --plugin cannot be combined with --local, --team, or --no-team" >&2
-    exit 1
-  fi
-  SKILL_PREFIX=1
-  SKILL_PREFIX_FLAG=1
-  PLUGIN_OUTPUT_DIR="$(pwd -P)"
-  if [ "$INSTALL_CLAUDE" -eq 1 ]; then
-    INSTALL_SKILLS_DIR="$PLUGIN_OUTPUT_DIR/.claude/skills"
-    INSTALL_GSTACK_DIR="$INSTALL_SKILLS_DIR/gstack"
-    PLUGIN_HOOKS_DIR="$PLUGIN_OUTPUT_DIR/.claude/hooks"
-    PLUGIN_HOOKS_FILE="$PLUGIN_HOOKS_DIR/hooks.json"
-  fi
-  if [ "$INSTALL_CODEX" -eq 1 ]; then
-    CODEX_SKILLS="$PLUGIN_OUTPUT_DIR/.agents/skills"
-    CODEX_GSTACK="$CODEX_SKILLS/gstack"
-  fi
-fi
-
 
 migrate_direct_codex_install() {
   local gstack_dir="$1"
@@ -802,55 +775,6 @@ create_agents_sidecar() {
 # Codex scans ~/.codex/skills recursively. Exposing the whole repo here causes
 # duplicate skills because source SKILL.md files and generated Codex skills are
 # both discoverable. Keep this directory limited to runtime assets + root skill.
-create_claude_plugin_runtime_root() {
-  local gstack_dir="$1"
-  local claude_gstack="$2"
-
-  if [ -L "$claude_gstack" ]; then
-    rm -f "$claude_gstack"
-  elif [ -d "$claude_gstack" ] && [ "$claude_gstack" != "$gstack_dir" ]; then
-    rm -rf "$claude_gstack"
-  fi
-
-  mkdir -p "$claude_gstack" "$claude_gstack/browse" "$claude_gstack/design" "$claude_gstack/hosts/claude" "$claude_gstack/review" "$claude_gstack/qa" "$claude_gstack/plan-devex-review"
-
-  if [ -d "$gstack_dir/bin" ]; then
-    _link_or_copy "$gstack_dir/bin" "$claude_gstack/bin"
-  fi
-  if [ -d "$gstack_dir/browse/dist" ]; then
-    _link_or_copy "$gstack_dir/browse/dist" "$claude_gstack/browse/dist"
-  fi
-  if [ -d "$gstack_dir/browse/bin" ]; then
-    _link_or_copy "$gstack_dir/browse/bin" "$claude_gstack/browse/bin"
-  fi
-  if [ -d "$gstack_dir/design/dist" ]; then
-    _link_or_copy "$gstack_dir/design/dist" "$claude_gstack/design/dist"
-  fi
-  if [ -d "$gstack_dir/hosts/claude/hooks" ]; then
-    _link_or_copy "$gstack_dir/hosts/claude/hooks" "$claude_gstack/hosts/claude/hooks"
-  fi
-  for f in checklist.md design-checklist.md greptile-triage.md TODOS-format.md; do
-    if [ -f "$gstack_dir/review/$f" ]; then
-      _link_or_copy "$gstack_dir/review/$f" "$claude_gstack/review/$f"
-    fi
-  done
-  if [ -d "$gstack_dir/review/specialists" ]; then
-    _link_or_copy "$gstack_dir/review/specialists" "$claude_gstack/review/specialists"
-  fi
-  if [ -d "$gstack_dir/qa/templates" ]; then
-    _link_or_copy "$gstack_dir/qa/templates" "$claude_gstack/qa/templates"
-  fi
-  if [ -d "$gstack_dir/qa/references" ]; then
-    _link_or_copy "$gstack_dir/qa/references" "$claude_gstack/qa/references"
-  fi
-  if [ -f "$gstack_dir/plan-devex-review/dx-hall-of-fame.md" ]; then
-    _link_or_copy "$gstack_dir/plan-devex-review/dx-hall-of-fame.md" "$claude_gstack/plan-devex-review/dx-hall-of-fame.md"
-  fi
-  if [ -f "$gstack_dir/ETHOS.md" ]; then
-    _link_or_copy "$gstack_dir/ETHOS.md" "$claude_gstack/ETHOS.md"
-  fi
-}
-
 create_codex_runtime_root() {
   local gstack_dir="$1"
   local codex_gstack="$2"
@@ -1058,9 +982,6 @@ fi
 
 if [ "$INSTALL_CLAUDE" -eq 1 ]; then
   if [ "$SKILLS_BASENAME" = "skills" ]; then
-    if [ "$PLUGIN_MODE" -eq 1 ]; then
-      create_claude_plugin_runtime_root "$SOURCE_GSTACK_DIR" "$INSTALL_GSTACK_DIR"
-    fi
     # Clean up stale symlinks from the opposite prefix mode
     if [ "$SKILL_PREFIX" -eq 1 ]; then
       cleanup_old_claude_symlinks "$SOURCE_GSTACK_DIR" "$INSTALL_SKILLS_DIR"
@@ -1069,7 +990,7 @@ if [ "$INSTALL_CLAUDE" -eq 1 ]; then
     fi
     # Patch name: fields BEFORE creating symlinks so link_claude_skill_dirs
     # reads the correct (patched) name: values for symlink naming
-      "$SOURCE_GSTACK_DIR/bin/gstack-patch-names" "$SOURCE_GSTACK_DIR" "$SKILL_PREFIX"
+    "$SOURCE_GSTACK_DIR/bin/gstack-patch-names" "$SOURCE_GSTACK_DIR" "$SKILL_PREFIX"
     link_claude_skill_dirs "$SOURCE_GSTACK_DIR" "$INSTALL_SKILLS_DIR"
     link_claude_root_skill_alias "$SOURCE_GSTACK_DIR" "$INSTALL_SKILLS_DIR"
     # Self-healing: re-run gstack-relink to ensure name: fields and directory
@@ -1317,23 +1238,6 @@ rm -f /tmp/gstack-latest-version
 SETTINGS_HOOK="$SOURCE_GSTACK_DIR/bin/gstack-settings-hook"
 HOOK_CMD="$SOURCE_GSTACK_DIR/bin/gstack-session-update"
 
-if [ "$PLUGIN_MODE" -eq 1 ] && [ "$INSTALL_CLAUDE" -eq 1 ] && [ -x "$SETTINGS_HOOK" ]; then
-  mkdir -p "$PLUGIN_HOOKS_DIR"
-  rm -f "$PLUGIN_HOOKS_FILE"
-  GSTACK_SETTINGS_FILE="$PLUGIN_HOOKS_FILE" "$SETTINGS_HOOK" add-event \
-    --event PostToolUse \
-    --matcher '(AskUserQuestion|mcp__.*__AskUserQuestion)' \
-    --command "$SOURCE_GSTACK_DIR/hosts/claude/hooks/question-log-hook" \
-    --source plan-tune-cathedral \
-    --timeout 5 >/dev/null
-  GSTACK_SETTINGS_FILE="$PLUGIN_HOOKS_FILE" "$SETTINGS_HOOK" add-event \
-    --event PreToolUse \
-    --matcher '(AskUserQuestion|mcp__.*__AskUserQuestion)' \
-    --command "$SOURCE_GSTACK_DIR/hosts/claude/hooks/question-preference-hook" \
-    --source plan-tune-cathedral \
-    --timeout 5 >/dev/null
-fi
-
 if [ "$TEAM_MODE" -eq 1 ]; then
   "$GSTACK_CONFIG" set auto_upgrade true 2>/dev/null || true
   "$GSTACK_CONFIG" set team_mode true 2>/dev/null || true
@@ -1417,7 +1321,6 @@ AUQ_ERROR_FALLBACK_HOOK="$SOURCE_GSTACK_DIR/hosts/claude/hooks/auq-error-fallbac
 PLAN_TUNE_INSTALL_MARKER="$HOME/.gstack/.plan-tune-hooks-prompted"
 
 if [ "$NO_TEAM_MODE" -ne 1 ] \
-   && [ "$PLUGIN_MODE" -ne 1 ] \
    && [ -x "$SETTINGS_HOOK" ] \
    && [ -x "$PLAN_TUNE_LOG_HOOK" ] \
    && [ -x "$PLAN_TUNE_PREF_HOOK" ]; then

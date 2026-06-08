@@ -22,6 +22,8 @@ bin/gstack-global-discover*
 .context/
 .claude/
 docs/superpowers/
+skills/
+hooks/
 extension/.auth.json
 # xterm assets are vendored from npm at build time; not source-of-truth.
 extension/lib/xterm.js

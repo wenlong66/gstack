@@ -12,7 +12,7 @@
   "plugins": [
     {
       "name": "gstack",
-      "source": "./.claude",
+      "source": ".",
       "description": "Garry's Stack — Claude Code skills plus fast browser automation for AI-assisted engineering workflows.",
       "version": "1.55.1.0",
       "license": "MIT"

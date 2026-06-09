@@ -767,6 +767,117 @@ link_codex_skill_dirs() {
   fi
 }
 
+  # '$_ROOT/.claude/skills/gstack|${CLAUDE_PLUGIN_ROOT}'
+  # '$HOME/.claude/skills/gstack|${GSTACK_ROOT}'
+
+CLAUDE_PLUGIN_PATH_REWRITES=(
+  '$_ROOT/.claude/skills/gstack|${CLAUDE_PLUGIN_ROOT}'
+  '$HOME/.claude/skills/gstack|${CLAUDE_PLUGIN_ROOT}'
+  '~/.claude/skills/gstack|${CLAUDE_PLUGIN_ROOT}'
+  '.claude/skills/gstack|${CLAUDE_PLUGIN_ROOT}'
+  '.claude/skills/review|${CLAUDE_PLUGIN_ROOT}/review'
+  '.claude/skills|${CLAUDE_PLUGIN_ROOT}/skills'
+)
+
+_apply_claude_plugin_rewrites() {
+  local src="$1"
+  local dst="$2"
+  local sed_args=()
+  local rewrite old new old_escaped new_escaped
+
+  for rewrite in "${CLAUDE_PLUGIN_PATH_REWRITES[@]}"; do
+    old="${rewrite%%|*}"
+    new="${rewrite#*|}"
+    old_escaped="${old//\\/\\\\}"
+    old_escaped="${old_escaped//./\\.}"
+    old_escaped="${old_escaped//\$/\\$}"
+    old_escaped="${old_escaped//|/\\|}"
+    new_escaped="${new//\\/\\\\}"
+    new_escaped="${new_escaped//&/\\&}"
+    new_escaped="${new_escaped//|/\\|}"
+    sed_args+=( -e "s|${old_escaped}|${new_escaped}|g" )
+  done
+
+  sed "${sed_args[@]}" "$src" > "$dst"
+}
+
+_patch_plugin_skill_name() {
+  local file="$1"
+  local new_name="$2"
+  local current_name tmp
+
+  current_name=$(grep -m1 '^name:' "$file" 2>/dev/null | sed 's/^name:[[:space:]]*//' | tr -d '[:space:]' || true)
+  [ -z "$current_name" ] && return 0
+  [ "$current_name" = "$new_name" ] && return 0
+
+  tmp="$(mktemp "${file}.XXXXXX")"
+  sed "1,/^---$/s/^name:[[:space:]]*${current_name}/name: ${new_name}/" "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+link_claude_plugin_skill_dirs() {
+  local gstack_dir="$1"
+  local skills_dir="$2"
+  local linked=()
+
+  mkdir -p "$skills_dir"
+
+  for skill_dir in "$gstack_dir"/*/; do
+    [ -f "$skill_dir/SKILL.md" ] || continue
+    local dir_name
+    dir_name="$(basename "$skill_dir")"
+    [ "$dir_name" = "node_modules" ] && continue
+    local skill_name link_name
+    skill_name=$(grep -m1 '^name:' "$skill_dir/SKILL.md" 2>/dev/null | sed 's/^name:[[:space:]]*//' | tr -d '[:space:]')
+    [ -z "$skill_name" ] && skill_name="$dir_name"
+    if [ "$SKILL_PREFIX" -eq 1 ]; then
+      case "$skill_name" in
+        gstack-*) link_name="$skill_name" ;;
+        *)        link_name="gstack-$skill_name" ;;
+      esac
+    else
+      link_name="$skill_name"
+    fi
+    local target="$skills_dir/$link_name"
+    rm -rf "$target"
+    mkdir -p "$target"
+    _apply_claude_plugin_rewrites "$skill_dir/SKILL.md" "$target/SKILL.md"
+    _patch_plugin_skill_name "$target/SKILL.md" "$link_name"
+    if [ -d "$skill_dir/sections" ]; then
+      mkdir -p "$target/sections"
+      if [ -f "$skill_dir/sections/manifest.json" ]; then
+        _link_or_copy "$skill_dir/sections/manifest.json" "$target/sections/manifest.json"
+      fi
+      for section_file in "$skill_dir/sections"/*.md; do
+        [ -f "$section_file" ] || continue
+        _apply_claude_plugin_rewrites "$section_file" "$target/sections/$(basename "$section_file")"
+      done
+    fi
+    linked+=("$link_name")
+  done
+
+  if [ -f "$gstack_dir/SKILL.md" ]; then
+    local root_target="$skills_dir/gstack"
+    rm -rf "$root_target"
+    mkdir -p "$root_target"
+    _apply_claude_plugin_rewrites "$gstack_dir/SKILL.md" "$root_target/SKILL.md"
+    linked+=("gstack")
+  fi
+
+  if [ -d "$skills_dir/gstack-open-gstack-browser" ]; then
+    local connect_alias="$skills_dir/connect-chrome"
+    if [ "$SKILL_PREFIX" -eq 1 ]; then
+      connect_alias="$skills_dir/gstack-connect-chrome"
+    fi
+    rm -rf "$connect_alias"
+    _link_or_copy "$skills_dir/gstack-open-gstack-browser" "$connect_alias"
+    linked+=("$(basename "$connect_alias")")
+  fi
+
+  if [ ${#linked[@]} -gt 0 ]; then
+    echo "  copied plugin skills: ${linked[*]}"
+  fi
+}
+
 # ─── Helper: create .agents/skills/gstack/ sidecar symlinks ──────────
 # Codex/Gemini/Cursor read skills from .agents/skills/. We link runtime
 # assets (bin/, browse/dist/, review/, qa/, etc.) so skill templates can
@@ -1009,7 +1120,13 @@ if [ "$SKILLS_BASENAME" = "skills" ] && [ "$SKILLS_PARENT_BASENAME" = ".agents" 
 fi
 
 if [ "$INSTALL_CLAUDE" -eq 1 ]; then
-  if [ "$SKILLS_BASENAME" = "skills" ]; then
+  if [ "$PLUGIN_MODE" -eq 1 ]; then
+    mkdir -p "$INSTALL_SKILLS_DIR"
+    link_claude_plugin_skill_dirs "$SOURCE_GSTACK_DIR" "$INSTALL_SKILLS_DIR"
+    log "gstack ready (claude plugin)."
+    log "  skills: $INSTALL_SKILLS_DIR"
+    log "  browse: $BROWSE_BIN"
+  elif [ "$SKILLS_BASENAME" = "skills" ]; then
     # Clean up stale symlinks from the opposite prefix mode
     if [ "$SKILL_PREFIX" -eq 1 ]; then
       cleanup_old_claude_symlinks "$SOURCE_GSTACK_DIR" "$INSTALL_SKILLS_DIR"

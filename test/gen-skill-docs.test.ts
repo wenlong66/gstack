@@ -2272,6 +2272,42 @@ describe('setup script validation', () => {
     expect(claudeSection).not.toContain('link_codex_skill_dirs');
   });
 
+  test('plugin Claude setup copies source Claude skills into repo-root plugin output', () => {
+    const fnStart = setupContent.indexOf('link_claude_plugin_skill_dirs()');
+    expect(fnStart).toBeGreaterThanOrEqual(0);
+    const fnEnd = setupContent.indexOf('}', setupContent.indexOf('linked[@]}', fnStart));
+    const fnBody = setupContent.slice(fnStart, fnEnd);
+    expect(fnBody).toContain('for skill_dir in "$gstack_dir"/*/; do');
+    expect(fnBody).toContain('CLAUDE_PLUGIN_PATH_REWRITES=(');
+    expect(fnBody).toContain('$_ROOT/.claude/skills/gstack');
+    expect(fnBody).toContain('$HOME/.claude/skills/gstack');
+    expect(fnBody).toContain('~/.claude/skills/gstack');
+    expect(fnBody).toContain('${GSTACK_ROOT}');
+    expect(fnBody).toContain('.claude/skills/gstack');
+    expect(fnBody).toContain('${CLAUDE_PLUGIN_ROOT}');
+    expect(fnBody).toContain('_apply_claude_plugin_rewrites');
+  });
+
+  test('plugin Claude setup preserves section manifests and connect-chrome alias', () => {
+    const fnStart = setupContent.indexOf('link_claude_plugin_skill_dirs()');
+    expect(fnStart).toBeGreaterThanOrEqual(0);
+    const fnEnd = setupContent.indexOf('}', setupContent.indexOf('linked[@]}', fnStart));
+    const fnBody = setupContent.slice(fnStart, fnEnd);
+    expect(fnBody).toContain('sections/manifest.json');
+    expect(fnBody).toContain('gstack-open-gstack-browser');
+    expect(fnBody).toContain('gstack-connect-chrome');
+  });
+
+  test('plugin Claude setup does not use a separate claude-plugin host generator', () => {
+    expect(setupContent).not.toContain('gen:skill-docs --host claude-plugin');
+    expect(setupContent).not.toContain('gstack-patch-names" "$SOURCE_GSTACK_DIR" "$SKILL_PREFIX"');
+  });
+
+  test('plugin Claude hooks still point at CLAUDE_PLUGIN_ROOT hook scripts', () => {
+    expect(setupContent).toContain("'${CLAUDE_PLUGIN_ROOT}/hosts/claude/hooks/question-log-hook'");
+    expect(setupContent).toContain("'${CLAUDE_PLUGIN_ROOT}/hosts/claude/hooks/question-preference-hook'");
+  });
+
   test('Codex install uses link_codex_skill_dirs', () => {
     // The Codex install section (section 5) should use the Codex function
     const codexSection = setupContent.slice(

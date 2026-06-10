@@ -1383,23 +1383,6 @@ rm -f /tmp/gstack-latest-version
 SETTINGS_HOOK="$SOURCE_GSTACK_DIR/bin/gstack-settings-hook"
 HOOK_CMD="$SOURCE_GSTACK_DIR/bin/gstack-session-update"
 
-if [ "$PLUGIN_MODE" -eq 1 ] && [ "$INSTALL_CLAUDE" -eq 1 ] && [ -x "$SETTINGS_HOOK" ]; then
-  mkdir -p "$PLUGIN_HOOKS_DIR"
-  rm -f "$PLUGIN_HOOKS_FILE"
-  GSTACK_SETTINGS_FILE="$PLUGIN_HOOKS_FILE" "$SETTINGS_HOOK" add-event \
-    --event PostToolUse \
-    --matcher '(AskUserQuestion|mcp__.*__AskUserQuestion)' \
-    --command '${CLAUDE_PLUGIN_ROOT}/hosts/claude/hooks/question-log-hook' \
-    --source plan-tune-cathedral \
-    --timeout 5 >/dev/null
-  GSTACK_SETTINGS_FILE="$PLUGIN_HOOKS_FILE" "$SETTINGS_HOOK" add-event \
-    --event PreToolUse \
-    --matcher '(AskUserQuestion|mcp__.*__AskUserQuestion)' \
-    --command '${CLAUDE_PLUGIN_ROOT}/hosts/claude/hooks/question-preference-hook' \
-    --source plan-tune-cathedral \
-    --timeout 5 >/dev/null
-fi
-
 if [ "$TEAM_MODE" -eq 1 ]; then
   "$GSTACK_CONFIG" set auto_upgrade true 2>/dev/null || true
   "$GSTACK_CONFIG" set team_mode true 2>/dev/null || true
@@ -1481,6 +1464,30 @@ PLAN_TUNE_LOG_HOOK="$SOURCE_GSTACK_DIR/hosts/claude/hooks/question-log-hook"
 PLAN_TUNE_PREF_HOOK="$SOURCE_GSTACK_DIR/hosts/claude/hooks/question-preference-hook"
 AUQ_ERROR_FALLBACK_HOOK="$SOURCE_GSTACK_DIR/hosts/claude/hooks/auq-error-fallback-hook"
 PLAN_TUNE_INSTALL_MARKER="$HOME/.gstack/.plan-tune-hooks-prompted"
+
+if [ "$PLUGIN_MODE" -eq 1 ] && [ "$INSTALL_CLAUDE" -eq 1 ] && [ -x "$SETTINGS_HOOK" ]; then
+  mkdir -p "$PLUGIN_HOOKS_DIR"
+  rm -f "$PLUGIN_HOOKS_FILE"
+  GSTACK_SETTINGS_FILE="$PLUGIN_HOOKS_FILE" "$SETTINGS_HOOK" add-event \
+    --event PostToolUse \
+    --matcher '(AskUserQuestion|mcp__.*__AskUserQuestion)' \
+    --command "$PLAN_TUNE_LOG_HOOK" \
+    --source plan-tune-cathedral \
+    --timeout 5 >/dev/null
+  GSTACK_SETTINGS_FILE="$PLUGIN_HOOKS_FILE" "$SETTINGS_HOOK" add-event \
+    --event PreToolUse \
+    --matcher '(AskUserQuestion|mcp__.*__AskUserQuestion)' \
+    --command "$PLAN_TUNE_PREF_HOOK" \
+    --source plan-tune-cathedral \
+    --timeout 5 >/dev/null
+
+  GSTACK_SETTINGS_FILE="$PLUGIN_HOOKS_FILE" "$SETTINGS_HOOK" add-event \
+    --event PostToolUse \
+    --matcher '(AskUserQuestion|mcp__.*__AskUserQuestion)' \
+    --command "$AUQ_ERROR_FALLBACK_HOOK" \
+    --source auq-error-fallback \
+    --timeout 5
+fi
 
 if [ "$NO_TEAM_MODE" -ne 1 ] \
    && [ "$PLUGIN_MODE" -ne 1 ] \

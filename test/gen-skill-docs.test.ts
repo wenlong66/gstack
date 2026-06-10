@@ -2306,6 +2306,8 @@ describe('setup script validation', () => {
   test('plugin Claude hooks still point at CLAUDE_PLUGIN_ROOT hook scripts', () => {
     expect(setupContent).toContain("'${CLAUDE_PLUGIN_ROOT}/hosts/claude/hooks/question-log-hook'");
     expect(setupContent).toContain("'${CLAUDE_PLUGIN_ROOT}/hosts/claude/hooks/question-preference-hook'");
+    expect(setupContent).toContain("'${CLAUDE_PLUGIN_ROOT}/hosts/claude/hooks/auq-error-fallback-hook'");
+    expect(setupContent).toContain('--source auq-error-fallback');
   });
 
   test('Codex install uses link_codex_skill_dirs', () => {

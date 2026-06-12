@@ -108,8 +108,8 @@ lookup_default() {
     routing_declined) echo "false" ;;
     telemetry) echo "off" ;;
     auto_upgrade) echo "false" ;;
-    update_check) echo "true" ;;
-    skill_prefix) echo "false" ;;
+    update_check) echo "false" ;;
+    skill_prefix) echo "true" ;;
     checkpoint_mode) echo "explicit" ;;
     checkpoint_push) echo "false" ;;
     explain_level) echo "default" ;;

@@ -37,6 +37,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { spawnSync } from 'child_process';
+import { fileURLToPath } from 'url';
 
 interface HookStdin {
   session_id?: string;
@@ -94,6 +95,15 @@ function readStdin(): Promise<string> {
     // Hard cutoff so we don't hang the user's session waiting for stdin.
     setTimeout(() => resolve(buf), 2000);
   });
+}
+
+export function postToolUseNoOpOutput(): { hookSpecificOutput: { hookEventName: 'PostToolUse' } } {
+  return { hookSpecificOutput: { hookEventName: 'PostToolUse' } };
+}
+
+function defer(): void {
+  process.stdout.write(JSON.stringify(postToolUseNoOpOutput()));
+  process.exit(0);
 }
 
 function hashQuestionId(skill: string, question: string, options: string[]): string {
@@ -204,20 +214,35 @@ function detectSkill(cwd: string | undefined): string {
   return 'unknown';
 }
 
+function shellPath(filePath: string): string {
+  if (process.platform !== 'win32') return filePath;
+  return filePath
+    .replace(/\\/g, '/')
+    .replace(/^\/?([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`);
+}
+
 function spawnLog(payload: Record<string, unknown>, cwd?: string): void {
   // Locate the bin relative to this script's directory.
-  const here = path.dirname(new URL(import.meta.url).pathname);
+  const here = path.dirname(fileURLToPath(import.meta.url));
   // hosts/claude/hooks/ -> ../../../bin/
   const repoRoot = path.resolve(here, '..', '..', '..');
   const bin = path.join(repoRoot, 'bin', 'gstack-question-log');
-  const res = spawnSync(bin, [JSON.stringify(payload)], {
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 3000,
-    // Run from the originating tool call's cwd so gstack-slug resolves to
-    // the project the user is actually in, not the hook script's location.
-    cwd: cwd && fs.existsSync(cwd) ? cwd : undefined,
-  });
+  const args = [JSON.stringify(payload)];
+  const res = process.platform === 'win32'
+    ? spawnSync('bash', [shellPath(bin), ...args], {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 3000,
+        cwd: cwd && fs.existsSync(cwd) ? cwd : undefined,
+      })
+    : spawnSync(bin, args, {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 3000,
+        // Run from the originating tool call's cwd so gstack-slug resolves to
+        // the project the user is actually in, not the hook script's location.
+        cwd: cwd && fs.existsSync(cwd) ? cwd : undefined,
+      });
   if (res.status !== 0) {
     logHookError(`gstack-question-log exited ${res.status}: ${res.stderr || res.stdout}`);
   }
@@ -226,14 +251,14 @@ function spawnLog(payload: Record<string, unknown>, cwd?: string): void {
 async function main(): Promise<void> {
   const raw = await readStdin();
   if (!raw.trim()) {
-    process.exit(0);
+    return defer();
   }
   let stdin: HookStdin;
   try {
     stdin = JSON.parse(raw);
   } catch (e) {
     logHookError(`stdin parse failed: ${(e as Error).message}`);
-    process.exit(0);
+    return defer();
   }
 
   const toolName = stdin.tool_name || '';
@@ -242,12 +267,12 @@ async function main(): Promise<void> {
     !toolName.match(/^mcp__.+__AskUserQuestion$/)
   ) {
     // Matcher should have filtered this out; defensive no-op.
-    process.exit(0);
+    return defer();
   }
 
   const questions = stdin.tool_input?.questions || [];
   if (questions.length === 0) {
-    process.exit(0);
+    return defer();
   }
 
   const skill = detectSkill(stdin.cwd);
@@ -280,10 +305,12 @@ async function main(): Promise<void> {
     spawnLog(payload, stdin.cwd);
   }
 
-  process.exit(0);
+  return defer();
 }
 
-main().catch((e) => {
-  logHookError(`main crash: ${(e as Error).message}`);
-  process.exit(0);
-});
+if (import.meta.main) {
+  main().catch((e) => {
+    logHookError(`main crash: ${(e as Error).message}`);
+    return defer();
+  });
+}

@@ -1,5 +1,7 @@
 # Using GBrain with GStack
 
+English | [简体中文](USING_GBRAIN_WITH_GSTACK.zh-CN.md)
+
 Your coding agent, with a memory it actually keeps.
 
 [GBrain](https://github.com/garrytan/gbrain) is a persistent knowledge base designed for AI agents. It stores what your agent learns, what you've decided, what worked and what didn't, and lets the agent search all of it on demand. GStack gives you a one-command path from zero to "gbrain is running, and my agent can call it" — with paths for try-it-local, share-with-your-team, and everything between.

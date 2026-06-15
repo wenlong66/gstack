@@ -22,7 +22,7 @@
 
 同一个人，不同的时代。差别就在工具。
 
-**gstack 就是我现在的工作方式。** 它把 Claude Code 变成一支虚拟工程团队：一个重新思考产品的 CEO、一个锁定架构的工程经理、一个专抓 AI 糊弄设计的设计师、一个寻找生产级 bug 的 reviewer、一个能打开真实浏览器的 QA 负责人、一个跑 OWASP + STRIDE 审计的安全官、一个真正把 PR 发出去的发布工程师。23 个专家角色，8 个强力工具，全是 slash command，全是 Markdown，全都免费，MIT 许可。
+**gstack 就是我现在的工作方式。** 它把 Claude Code 变成一支虚拟工程团队：一个重新思考产品的 CEO、一个锁定架构的工程经理、一个专抓 AI 糊弄设计的设计师、一个寻找生产级 bug 的评审、一个能打开真实浏览器的 QA 负责人、一个跑 OWASP + STRIDE 审计的安全官、一个真正把 PR 发出去的发布工程师。23 个专家角色，8 个强力工具，全是斜杠命令，全是 Markdown，全都免费，MIT 许可。
 
 这是我的开源软件工厂。我每天都在用它。我把它分享出来，是因为这些工具应该人人可用。
 
@@ -31,7 +31,7 @@ Fork 它。改进它。把它变成你自己的。如果你就是想喷免费开
 **这套东西适合谁：**
 - **创始人和 CEO** —— 尤其是还想亲自下场发货的技术型创始人
 - **第一次用 Claude Code 的人** —— 不想面对空白提示词，而是希望直接获得结构化角色
-- **Tech lead 和 staff engineer** —— 想在每个 PR 上都跑严格评审、QA 和发布自动化
+- **Tech lead 和 staff engineer** —— 想在每个 PR 上都跑严格评审、QA 和发布自动化的技术负责人
 
 ## 快速开始
 
@@ -50,7 +50,7 @@ Fork 它。改进它。把它变成你自己的。如果你就是想喷免费开
 
 打开 Claude Code，把下面这段贴进去，剩下的 Claude 会自己做。
 
-> Install gstack: run **`git clone --single-branch --depth 1 https://github.com/garrytan/gstack.git ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup`** then add a "gstack" section to CLAUDE.md that says to use the /browse skill from gstack for all web browsing, never use mcp__claude-in-chrome__* tools, and lists the available skills: /office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review, /design-consultation, /design-shotgun, /design-html, /review, /ship, /land-and-deploy, /canary, /benchmark, /browse, /connect-chrome, /qa, /qa-only, /design-review, /setup-browser-cookies, /setup-deploy, /setup-gbrain, /retro, /investigate, /document-release, /document-generate, /codex, /cso, /autoplan, /plan-devex-review, /devex-review, /careful, /freeze, /guard, /unfreeze, /gstack-upgrade, /learn. Then ask the user if they also want to add gstack to the current project so teammates get it.
+> 安装 gstack：执行 **`git clone --single-branch --depth 1 https://github.com/garrytan/gstack.git ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup`**，然后在 `CLAUDE.md` 里加一个 “gstack” 小节，写明所有网页浏览都使用 gstack 的 `/browse` skill，绝不要使用 `mcp__claude-in-chrome__*` 工具，并列出这些可用技能：`/office-hours`、`/plan-ceo-review`、`/plan-eng-review`、`/plan-design-review`、`/design-consultation`、`/design-shotgun`、`/design-html`、`/review`、`/ship`、`/land-and-deploy`、`/canary`、`/benchmark`、`/browse`、`/connect-chrome`、`/qa`、`/qa-only`、`/design-review`、`/setup-browser-cookies`、`/setup-deploy`、`/setup-gbrain`、`/retro`、`/investigate`、`/document-release`、`/document-generate`、`/codex`、`/cso`、`/autoplan`、`/plan-devex-review`、`/devex-review`、`/careful`、`/freeze`、`/guard`、`/unfreeze`、`/gstack-upgrade`、`/learn`。最后再问用户，是否也要把 gstack 加到当前项目里，这样队友也能直接用。
 
 ### 第 2 步：团队模式，为共享仓库自动更新（推荐）
 
@@ -68,7 +68,7 @@ Fork 它。改进它。把它变成你自己的。如果你就是想喷免费开
 
 OpenClaw 通过 ACP 拉起 Claude Code session，所以只要 Claude Code 已经装了 gstack，所有 gstack skill 都能直接工作。把下面这段贴给你的 OpenClaw agent：
 
-> Install gstack: run `git clone --single-branch --depth 1 https://github.com/garrytan/gstack.git ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup` to install gstack for Claude Code. Then add a "Coding Tasks" section to AGENTS.md that says: when spawning Claude Code sessions for coding work, tell the session to use gstack skills. Include these examples — security audit: "Load gstack. Run /cso", code review: "Load gstack. Run /review", QA test a URL: "Load gstack. Run /qa https://...", build a feature end-to-end: "Load gstack. Run /autoplan, implement the plan, then run /ship", plan before building: "Load gstack. Run /office-hours then /autoplan. Save the plan, don't implement."
+> 安装 gstack：执行 `git clone --single-branch --depth 1 https://github.com/garrytan/gstack.git ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup`，为 Claude Code 装好 gstack。然后在 `AGENTS.md` 里增加一个 “Coding Tasks” 小节，写明：当它为编码任务拉起 Claude Code session 时，要明确告诉该 session 使用 gstack skills。可以附上这些示例：安全审计：`Load gstack. Run /cso`，代码评审：`Load gstack. Run /review`，QA 测一个 URL：`Load gstack. Run /qa https://...`，端到端实现功能：`Load gstack. Run /autoplan, implement the plan, then run /ship`，先做计划再开工：`Load gstack. Run /office-hours then /autoplan. Save the plan, don't implement.`
 
 **装好之后，正常跟你的 OpenClaw agent 说话就行：**
 

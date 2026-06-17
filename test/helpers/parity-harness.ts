@@ -210,7 +210,11 @@ const MONOLITH_INVARIANTS: ParityInvariant[] = [
     skill: 'review',
     mustContain: ['confidence', 'P1', 'P2'],
     mustHaveHeadings: ['## Preamble', '## When to invoke'],
-    maxSizeRatio: 1.05,
+    // The adversarial step swapped its bare `command -v codex` check for the shared
+    // codexPreflight() block (install + auth tri-state + CODEX_MODE branch prose),
+    // landing ~6.3% over the v1.53.0.0 baseline. Intentional: it adds proper
+    // not-installed vs not-authed handling, not slop.
+    maxSizeRatio: 1.08,
     minBytes: 70_000,
   },
   {
@@ -224,7 +228,10 @@ const MONOLITH_INVARIANTS: ParityInvariant[] = [
     skill: 'investigate',
     mustContain: ['root cause', 'hypothes'],
     mustHaveHeadings: ['## Preamble', '## When to invoke'],
-    maxSizeRatio: 1.05,
+    // Cross-cutting preamble growth (v1.57.2.0 AUQ-failure prose fallback ~2KB + the
+    // cross-session decision-memory nudge) lands this skill just over the strict 1.05;
+    // headroom for the shared preamble additions (matches the carved-skill overrides).
+    maxSizeRatio: 1.07,
     minBytes: 30_000,
   },
   {

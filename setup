@@ -89,11 +89,11 @@ while [ $# -gt 0 ]; do
     --host) [ -z "$2" ] && echo "Missing value for --host (expected claude, codex, kiro, factory, opencode, openclaw, hermes, gbrain, or auto)" >&2 && exit 1; HOST="$2"; shift 2 ;;
     --host=*) HOST="${1#--host=}"; shift ;;
     --local) LOCAL_INSTALL=1; shift ;;
+    --plugin) PLUGIN_MODE=1; shift ;;
     --prefix)    SKILL_PREFIX=1; SKILL_PREFIX_FLAG=1; shift ;;
     --no-prefix) SKILL_PREFIX=0; SKILL_PREFIX_FLAG=1; shift ;;
     --team)    TEAM_MODE=1; shift ;;
     --no-team) NO_TEAM_MODE=1; shift ;;
-    --plugin) PLUGIN_MODE=1; shift ;;
     --plan-tune-hooks)    PLAN_TUNE_HOOKS_MODE="yes"; shift ;;
     --no-plan-tune-hooks) PLAN_TUNE_HOOKS_MODE="no"; shift ;;
     --plan-tune-hooks=*)  PLAN_TUNE_HOOKS_MODE="${1#--plan-tune-hooks=}"; shift ;;
@@ -142,7 +142,7 @@ case "$HOST" in
 esac
 
 # ─── Resolve skill prefix preference ─────────────────────────
-# Priority: CLI flag > saved config > interactive prompt (or prefixed default for non-TTY)
+# Priority: CLI flag > saved config > interactive prompt (or flat default for non-TTY)
 GSTACK_CONFIG="$SOURCE_GSTACK_DIR/bin/gstack-config"
 export GSTACK_SETUP_RUNNING=1  # Prevent gstack-config post-set hook from triggering relink mid-setup
 if [ "$SKILL_PREFIX_FLAG" -eq 0 ]; then
@@ -152,27 +152,27 @@ if [ "$SKILL_PREFIX_FLAG" -eq 0 ]; then
   elif [ "$_saved_prefix" = "false" ]; then
     SKILL_PREFIX=0
   else
-    # No saved preference — prompt interactively (or default prefixed for non-TTY/quiet)
+    # No saved preference — prompt interactively (or default flat for non-TTY/quiet)
     if [ "$QUIET" -eq 1 ]; then
-      SKILL_PREFIX=1
+      SKILL_PREFIX=0
     elif [ -t 0 ]; then
       echo ""
       echo "Skill naming: how should gstack skills appear?"
       echo ""
       echo "  1) Short names: /qa, /ship, /review"
-      echo "     Clean and fast to type."
+      echo "     Recommended. Clean and fast to type."
       echo ""
       echo "  2) Namespaced: /gstack-qa, /gstack-ship, /gstack-review"
-      echo "     Recommended if you run other skill packs alongside gstack to avoid conflicts."
+      echo "     Use this if you run other skill packs alongside gstack to avoid conflicts."
       echo ""
-      printf "Choice [1/2] (default: 2, auto-selects in 10s): "
+      printf "Choice [1/2] (default: 1, auto-selects in 10s): "
       read -t 10 -r _prefix_choice </dev/tty 2>/dev/null || _prefix_choice=""
       case "$_prefix_choice" in
-        1) SKILL_PREFIX=0 ;;
-        *) SKILL_PREFIX=1 ;;
+        2) SKILL_PREFIX=1 ;;
+        *) SKILL_PREFIX=0 ;;
       esac
     else
-      SKILL_PREFIX=1
+      SKILL_PREFIX=0
     fi
     # Save the choice for future runs
     "$GSTACK_CONFIG" set skill_prefix "$([ "$SKILL_PREFIX" -eq 1 ] && echo true || echo false)" 2>/dev/null || true
@@ -248,7 +248,6 @@ if [ "$PLUGIN_MODE" -eq 1 ]; then
     CODEX_GSTACK="$CODEX_SKILLS/gstack"
   fi
 fi
-
 
 migrate_direct_codex_install() {
   local gstack_dir="$1"
@@ -1431,22 +1430,37 @@ fi
 DETECT_BIN="$SOURCE_GSTACK_DIR/bin/gstack-gbrain-detect"
 GBRAIN_STATE_DIR="${GSTACK_HOME:-$HOME/.gstack}"
 DETECTION_FILE="$GBRAIN_STATE_DIR/gbrain-detection.json"
+# PID-unique tmp so concurrent setups (parallel Conductor workspaces) can't
+# clobber each other's in-flight detection write.
+DETECTION_TMP="$DETECTION_FILE.$$.tmp"
 mkdir -p "$GBRAIN_STATE_DIR"
 if [ -x "$DETECT_BIN" ]; then
-  if "$DETECT_BIN" > "$DETECTION_FILE.tmp" 2>/dev/null; then
-    mv "$DETECTION_FILE.tmp" "$DETECTION_FILE"
-    if grep -q '"gbrain_local_status": "ok"' "$DETECTION_FILE" 2>/dev/null; then
-      log "gbrain detected — regenerating Claude SKILL.md with brain-aware blocks (~250 token overhead per planning skill)..."
-      (
-        cd "$SOURCE_GSTACK_DIR"
-        bun_cmd run gen:skill-docs:user --host claude 2>&1 | tail -3
-      ) || log "  warning: gen:skill-docs:user failed — run 'bun run gen:skill-docs:user' manually if you want brain-aware blocks"
+  if "$DETECT_BIN" > "$DETECTION_TMP" 2>/dev/null; then
+    mv "$DETECTION_TMP" "$DETECTION_FILE"
+    # Single source of truth for "is gbrain usable" — `--is-ok` runs live
+    # detection (exit 0 iff ok), so setup, bin/dev-setup, and gstack-config
+    # all gate on the same check instead of re-grepping the JSON.
+    if "$DETECT_BIN" --is-ok 2>/dev/null; then
+      if [ -n "${GSTACK_SKIP_GBRAIN_REGEN:-}" ]; then
+        # Dev/source tree (set by bin/dev-setup): never regenerate tracked
+        # SKILL.md in place — that dirties checked-in source. Detection is
+        # still persisted above; the dev workspace renders the :user variant
+        # into an untracked dir, and other projects get blocks via
+        # `gstack-config gbrain-refresh`.
+        log "gbrain detected — GSTACK_SKIP_GBRAIN_REGEN set: leaving tracked SKILL.md canonical (dev/source tree)."
+      else
+        log "gbrain detected — regenerating Claude SKILL.md with brain-aware blocks (~250 token overhead per planning skill)..."
+        (
+          cd "$SOURCE_GSTACK_DIR"
+          bun_cmd run gen:skill-docs:user --host claude 2>&1 | tail -3
+        ) || log "  warning: gen:skill-docs:user failed — run 'bun run gen:skill-docs:user' manually if you want brain-aware blocks"
+      fi
     else
       log "gbrain not detected — brain-aware blocks suppressed in planning-skill SKILL.md files (zero token overhead)."
       log "  To enable: install gbrain via /setup-gbrain, then re-run ./setup or 'gstack-config gbrain-refresh'."
     fi
   else
-    rm -f "$DETECTION_FILE.tmp"
+    rm -f "$DETECTION_TMP"
     log "  warning: gstack-gbrain-detect failed — brain-aware blocks will stay suppressed"
   fi
 fi
@@ -1490,7 +1504,6 @@ if [ "$PLUGIN_MODE" -eq 1 ] && [ "$INSTALL_CLAUDE" -eq 1 ] && [ -x "$SETTINGS_HO
 fi
 
 if [ "$NO_TEAM_MODE" -ne 1 ] \
-   && [ "$PLUGIN_MODE" -ne 1 ] \
    && [ -x "$SETTINGS_HOOK" ] \
    && [ -x "$PLAN_TUNE_LOG_HOOK" ] \
    && [ -x "$PLAN_TUNE_PREF_HOOK" ]; then
@@ -1526,6 +1539,17 @@ if [ "$NO_TEAM_MODE" -ne 1 ] \
     *)                       PT_DECISION="prompt" ;;
   esac
 
+  # Conductor host reliability: the PreToolUse preference hook also carries the
+  # Conductor-prose enforcement (deny the flaky mcp__conductor__AskUserQuestion,
+  # redirect to a prose decision brief). A Conductor workspace setup otherwise
+  # falls through to "prompt" → the non-interactive skip below, leaving Conductor
+  # users without that backstop. Treat Conductor as an implicit opt-in — but
+  # only on the silent fall-through, never overriding an explicit --no-plan-tune-hooks.
+  if [ "$PT_DECISION" = "prompt" ] && { [ -n "${CONDUCTOR_WORKSPACE_PATH:-}" ] || [ -n "${CONDUCTOR_PORT:-}" ]; }; then
+    PT_DECISION="yes"
+    _PT_CONDUCTOR_AUTO=1
+  fi
+
   _install_plan_tune_hooks() {
     "$SETTINGS_HOOK" add-event \
       --event PostToolUse \
@@ -1560,10 +1584,15 @@ if [ "$NO_TEAM_MODE" -ne 1 ] \
     log ""
     log "Plan-tune hooks already installed. Run \`$SETTINGS_HOOK list-sources\` to inspect."
   elif [ "$PT_DECISION" = "yes" ]; then
-    # Explicit opt-in (flag / env / config). Non-interactive.
+    # Explicit opt-in (flag / env / config) or Conductor implicit opt-in. Non-interactive.
     _install_plan_tune_hooks
     log ""
-    log "Plan-tune hooks installed. Run /plan-tune anytime to inspect."
+    if [ "${_PT_CONDUCTOR_AUTO:-0}" -eq 1 ]; then
+      log "AskUserQuestion reliability hooks installed (Conductor detected): decisions"
+      log "render as a prose brief instead of the flaky AskUserQuestion tool. Inspect with /plan-tune."
+    else
+      log "Plan-tune hooks installed. Run /plan-tune anytime to inspect."
+    fi
     touch "$PLAN_TUNE_INSTALL_MARKER"
   elif [ "$PT_DECISION" = "no" ]; then
     # Explicit opt-out (flag / env / config). Non-interactive.

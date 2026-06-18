@@ -1479,40 +1479,33 @@ PLAN_TUNE_PREF_HOOK="$SOURCE_GSTACK_DIR/hosts/claude/hooks/question-preference-h
 AUQ_ERROR_FALLBACK_HOOK="$SOURCE_GSTACK_DIR/hosts/claude/hooks/auq-error-fallback-hook"
 PLAN_TUNE_INSTALL_MARKER="$HOME/.gstack/.plan-tune-hooks-prompted"
 
-if [ "$PLUGIN_MODE" -eq 1 ] && [ "$INSTALL_CLAUDE" -eq 1 ] && [ -x "$SETTINGS_HOOK" ]; then
-  mkdir -p "$PLUGIN_HOOKS_DIR"
-  rm -f "$PLUGIN_HOOKS_FILE"
-  GSTACK_SETTINGS_FILE="$PLUGIN_HOOKS_FILE" "$SETTINGS_HOOK" add-event \
-    --event PostToolUse \
-    --matcher '(AskUserQuestion|mcp__.*__AskUserQuestion)' \
-    --command "$PLAN_TUNE_LOG_HOOK" \
-    --source plan-tune-cathedral \
-    --timeout 5 >/dev/null
-  GSTACK_SETTINGS_FILE="$PLUGIN_HOOKS_FILE" "$SETTINGS_HOOK" add-event \
-    --event PreToolUse \
-    --matcher '(AskUserQuestion|mcp__.*__AskUserQuestion)' \
-    --command "$PLAN_TUNE_PREF_HOOK" \
-    --source plan-tune-cathedral \
-    --timeout 5 >/dev/null
-
-  GSTACK_SETTINGS_FILE="$PLUGIN_HOOKS_FILE" "$SETTINGS_HOOK" add-event \
-    --event PostToolUse \
-    --matcher '(AskUserQuestion|mcp__.*__AskUserQuestion)' \
-    --command "$AUQ_ERROR_FALLBACK_HOOK" \
-    --source auq-error-fallback \
-    --timeout 5
-fi
-
 if [ "$NO_TEAM_MODE" -ne 1 ] \
    && [ -x "$SETTINGS_HOOK" ] \
    && [ -x "$PLAN_TUNE_LOG_HOOK" ] \
    && [ -x "$PLAN_TUNE_PREF_HOOK" ]; then
 
+  if [ "$PLUGIN_MODE" -eq 1 ] && [ "$INSTALL_CLAUDE" -eq 1 ]; then
+    _PLAN_TUNE_SETTINGS_TARGET="$PLUGIN_HOOKS_FILE"
+    _PLAN_TUNE_ROLLBACK_HINT="GSTACK_SETTINGS_FILE=$PLUGIN_HOOKS_FILE $SETTINGS_HOOK rollback"
+  else
+    _PLAN_TUNE_SETTINGS_TARGET="$HOME/.claude/settings.json"
+    _PLAN_TUNE_ROLLBACK_HINT="$SETTINGS_HOOK rollback"
+  fi
+
+  _plan_tune_settings_hook() {
+    if [ "$PLUGIN_MODE" -eq 1 ] && [ "$INSTALL_CLAUDE" -eq 1 ]; then
+      mkdir -p "$PLUGIN_HOOKS_DIR"
+      GSTACK_SETTINGS_FILE="$PLUGIN_HOOKS_FILE" "$SETTINGS_HOOK" "$@"
+    else
+      "$SETTINGS_HOOK" "$@"
+    fi
+  }
+
   # Already installed? Require BOTH the plan-tune source AND the AUQ-error-fallback
   # source — so an existing install that predates the fallback hook re-runs the
   # install (which is idempotent for the plan-tune hooks) and picks up the new one.
   ALREADY_INSTALLED=0
-  _HOOK_SOURCES=$("$SETTINGS_HOOK" list-sources 2>/dev/null || true)
+  _HOOK_SOURCES=$(_plan_tune_settings_hook list-sources 2>/dev/null || true)
   if printf '%s' "$_HOOK_SOURCES" | grep -q "plan-tune-cathedral" \
      && printf '%s' "$_HOOK_SOURCES" | grep -q "auq-error-fallback"; then
     ALREADY_INSTALLED=1
@@ -1551,13 +1544,13 @@ if [ "$NO_TEAM_MODE" -ne 1 ] \
   fi
 
   _install_plan_tune_hooks() {
-    "$SETTINGS_HOOK" add-event \
+    _plan_tune_settings_hook add-event \
       --event PostToolUse \
       --matcher '(AskUserQuestion|mcp__.*__AskUserQuestion)' \
       --command "$PLAN_TUNE_LOG_HOOK" \
       --source plan-tune-cathedral \
       --timeout 5
-    "$SETTINGS_HOOK" add-event \
+    _plan_tune_settings_hook add-event \
       --event PreToolUse \
       --matcher '(AskUserQuestion|mcp__.*__AskUserQuestion)' \
       --command "$PLAN_TUNE_PREF_HOOK" \
@@ -1571,7 +1564,7 @@ if [ "$NO_TEAM_MODE" -ne 1 ] \
     # question-log capture hook (same event+matcher). A distinct source = a second
     # PostToolUse entry; both run in parallel.
     if [ -x "$AUQ_ERROR_FALLBACK_HOOK" ]; then
-      "$SETTINGS_HOOK" add-event \
+      _plan_tune_settings_hook add-event \
         --event PostToolUse \
         --matcher '(AskUserQuestion|mcp__.*__AskUserQuestion)' \
         --command "$AUQ_ERROR_FALLBACK_HOOK" \
@@ -1582,7 +1575,7 @@ if [ "$NO_TEAM_MODE" -ne 1 ] \
 
   if [ "$ALREADY_INSTALLED" -eq 1 ]; then
     log ""
-    log "Plan-tune hooks already installed. Run \`$SETTINGS_HOOK list-sources\` to inspect."
+    log "Plan-tune hooks already installed in $_PLAN_TUNE_SETTINGS_TARGET. Run /plan-tune anytime to inspect."
   elif [ "$PT_DECISION" = "yes" ]; then
     # Explicit opt-in (flag / env / config) or Conductor implicit opt-in. Non-interactive.
     _install_plan_tune_hooks
@@ -1622,15 +1615,15 @@ if [ "$NO_TEAM_MODE" -ne 1 ] \
     log "    convention; this makes them binding."
     log ""
     log "Diff preview (PostToolUse capture hook):"
-    "$SETTINGS_HOOK" diff-event \
+    _plan_tune_settings_hook diff-event \
       --event PostToolUse \
       --matcher '(AskUserQuestion|mcp__.*__AskUserQuestion)' \
       --command "$PLAN_TUNE_LOG_HOOK" \
       --source plan-tune-cathedral \
       --timeout 5 2>/dev/null || true
     log ""
-    log "Backup: settings.json.bak.<ts> written before any mutation."
-    log "Rollback: $SETTINGS_HOOK rollback"
+    log "Backup: ${_PLAN_TUNE_SETTINGS_TARGET}.bak.<ts> written before any mutation."
+    log "Rollback: $_PLAN_TUNE_ROLLBACK_HINT"
     log ""
     printf "Install both hooks now? [y/N] (default: N, auto-skips in %ss): " "$_PT_PROMPT_TIMEOUT"
     read -t "$_PT_PROMPT_TIMEOUT" -r PLAN_TUNE_INSTALL_REPLY </dev/tty 2>/dev/null || PLAN_TUNE_INSTALL_REPLY=""

@@ -1,6 +1,6 @@
 {
   "name": "gstack",
-  "version": "1.58.1.0",
+  "version": "1.58.4.0",
   "owner": {
     "name": "Garry Tan",
     "url": "https://github.com/garrytan"
@@ -14,7 +14,7 @@
       "name": "gstack",
       "source": ".",
       "description": "Garry's Stack — Claude Code skills plus fast browser automation for AI-assisted engineering workflows.",
-      "version": "1.58.1.0",
+      "version": "1.58.4.0",
       "license": "MIT"
     }
   ]

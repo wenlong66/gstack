@@ -3,11 +3,19 @@ import { getHostConfig } from '../../../hosts/index';
 
 export function generatePreambleBash(ctx: TemplateContext): string {
   const hostConfig = getHostConfig(ctx.host);
+  const pluginCacheFallback = ctx.host === 'codex'
+    ? `if [ ! -x "$GSTACK_ROOT/bin/gstack-config" ]; then
+  for _GSTACK_CAND in "$HOME/.codex/plugins/cache"/*/gstack/*/.agents/skills/gstack; do
+    [ -x "$_GSTACK_CAND/bin/gstack-config" ] && GSTACK_ROOT="$_GSTACK_CAND" && break
+  done
+fi
+`
+    : '';
   const runtimeRoot = hostConfig.usesEnvVars
     ? `_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
-GSTACK_ROOT="$HOME/${hostConfig.globalRoot}"
+GSTACK_ROOT="\${GSTACK_ROOT:-$HOME/${hostConfig.globalRoot}}"
 [ -n "$_ROOT" ] && [ -d "$_ROOT/${ctx.paths.localSkillRoot}" ] && GSTACK_ROOT="$_ROOT/${ctx.paths.localSkillRoot}"
-GSTACK_BIN="$GSTACK_ROOT/bin"
+${pluginCacheFallback}GSTACK_BIN="$GSTACK_ROOT/bin"
 GSTACK_BROWSE="$GSTACK_ROOT/browse/dist"
 GSTACK_DESIGN="$GSTACK_ROOT/design/dist"
 `

@@ -18,7 +18,7 @@ import { HOST_PATHS } from '../scripts/resolvers/types';
 import { generatePreamble } from '../scripts/resolvers/preamble';
 
 function makeCtx(
-  host: 'claude' | 'codex',
+  host: 'claude' | 'codex' | 'factory',
   tier: 1 | 2 | 3 | 4,
   model?: string,
 ): TemplateContext {
@@ -78,5 +78,18 @@ describe('Conductor signal (preamble bash)', () => {
     // The emission must be suppressed when the session is headless (eval/CI
     // inside Conductor must BLOCK, not render prose to nobody).
     expect(out).toMatch(/"\$_SESSION_KIND" != "headless"[\s\S]*CONDUCTOR_WORKSPACE_PATH[\s\S]*CONDUCTOR_PORT[\s\S]*CONDUCTOR_SESSION: true/);
+  });
+
+  test('codex preamble can resolve runtime root from Codex plugin cache', () => {
+    const out = generatePreamble(makeCtx('codex', 1, 'claude'));
+    expect(out).toContain('GSTACK_ROOT="${GSTACK_ROOT:-$HOME/.codex/skills/gstack}"');
+    expect(out).toContain('"$HOME/.codex/plugins/cache"/*/gstack/*/.agents/skills/gstack');
+    expect(out).toContain('[ -x "$_GSTACK_CAND/bin/gstack-config" ] && GSTACK_ROOT="$_GSTACK_CAND" && break');
+  });
+
+  test('non-Codex env-var hosts do not scan Codex plugin cache', () => {
+    const out = generatePreamble(makeCtx('factory', 1, 'claude'));
+    expect(out).toContain('GSTACK_ROOT="${GSTACK_ROOT:-$HOME/.factory/skills/gstack}"');
+    expect(out).not.toContain('.codex/plugins/cache');
   });
 });

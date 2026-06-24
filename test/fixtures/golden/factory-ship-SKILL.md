@@ -16,7 +16,7 @@ disable-model-invocation: true
 
 ```bash
 _ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
-GSTACK_ROOT="$HOME/.factory/skills/gstack"
+GSTACK_ROOT="${GSTACK_ROOT:-$HOME/.factory/skills/gstack}"
 [ -n "$_ROOT" ] && [ -d "$_ROOT/.factory/skills/gstack" ] && GSTACK_ROOT="$_ROOT/.factory/skills/gstack"
 GSTACK_BIN="$GSTACK_ROOT/bin"
 GSTACK_BROWSE="$GSTACK_ROOT/browse/dist"

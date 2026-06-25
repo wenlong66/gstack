@@ -768,14 +768,14 @@ link_codex_skill_dirs() {
 
   # '$_ROOT/.claude/skills/gstack|${CLAUDE_PLUGIN_ROOT}'
   # '$HOME/.claude/skills/gstack|${GSTACK_ROOT}'
+  # '.claude/skills/gstack|${CLAUDE_PLUGIN_ROOT}'
+  # '.claude/skills/review|${CLAUDE_PLUGIN_ROOT}/review'
+  # '.claude/skills|${CLAUDE_PLUGIN_ROOT}/skills'
+  # '$_ROOT/.claude/skills/gstack|${CLAUDE_PLUGIN_ROOT}'
 
 CLAUDE_PLUGIN_PATH_REWRITES=(
-  '$_ROOT/.claude/skills/gstack|${CLAUDE_PLUGIN_ROOT}'
   '$HOME/.claude/skills/gstack|${CLAUDE_PLUGIN_ROOT}'
   '~/.claude/skills/gstack|${CLAUDE_PLUGIN_ROOT}'
-  '.claude/skills/gstack|${CLAUDE_PLUGIN_ROOT}'
-  '.claude/skills/review|${CLAUDE_PLUGIN_ROOT}/review'
-  '.claude/skills|${CLAUDE_PLUGIN_ROOT}/skills'
 )
 
 _apply_claude_plugin_rewrites() {

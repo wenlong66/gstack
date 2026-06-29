@@ -54,6 +54,80 @@ export function discoverSectionTemplates(
   return results.sort((a, b) => a.tmpl.localeCompare(b.tmpl));
 }
 
+/**
+ * Discover static files that live next to on-demand section templates.
+ *
+ * Generated `.md` files are deliberately excluded: they are derived from
+ * `.md.tmpl` and must be rendered per host so path/tool rewrites stay current.
+ * Static sidecars such as `manifest.json` are copied as-is.
+ */
+export function discoverSectionStaticFiles(
+  root: string,
+): Array<{ source: string; output: string; skillDir: string }> {
+  const results: Array<{ source: string; output: string; skillDir: string }> = [];
+  for (const dir of subdirs(root)) {
+    const sectionsDir = path.join(root, dir, 'sections');
+    if (!fs.existsSync(sectionsDir) || !fs.statSync(sectionsDir).isDirectory()) continue;
+    for (const entry of fs.readdirSync(sectionsDir, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      if (entry.name.endsWith('.tmpl') || entry.name.endsWith('.md')) continue;
+      const rel = `${dir}/sections/${entry.name}`;
+      results.push({ source: rel, output: rel, skillDir: dir });
+    }
+  }
+  return results.sort((a, b) => a.source.localeCompare(b.source));
+}
+
+function walkFiles(dir: string, visit: (filePath: string) => void): void {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (SKIP.has(entry.name)) continue;
+      walkFiles(fullPath, visit);
+    } else if (entry.isFile()) {
+      visit(fullPath);
+    }
+  }
+}
+
+function isSkillSupportFile(skillDir: string, relToSkill: string): boolean {
+  if (!relToSkill.endsWith('.md')) return false;
+  if (skillDir === 'review') return true;
+  if (skillDir === 'qa') {
+    return relToSkill.startsWith('templates/') || relToSkill.startsWith('references/');
+  }
+  if (skillDir === 'plan-devex-review') return relToSkill === 'dx-hall-of-fame.md';
+  return false;
+}
+
+/**
+ * Discover Markdown support files that should travel with generated skill dirs.
+ *
+ * The allowlist is intentionally narrow: large runtime assets such as bin/,
+ * browse/dist/, design/dist/, and vendor code are installed through host runtime
+ * roots/sidecars, and arbitrary planning docs must not leak into generated skill
+ * bundles. Section bodies are rendered through discoverSectionTemplates() so
+ * host rewrites and freshness checks remain accurate.
+ */
+export function discoverSkillSupportFiles(
+  root: string,
+): Array<{ source: string; output: string; skillDir: string }> {
+  const results: Array<{ source: string; output: string; skillDir: string }> = [];
+  for (const dir of subdirs(root)) {
+    const skillRoot = path.join(root, dir);
+    if (!fs.existsSync(path.join(skillRoot, 'SKILL.md.tmpl'))) continue;
+    walkFiles(skillRoot, (filePath) => {
+      const relToSkill = path.relative(skillRoot, filePath).replace(/\\/g, '/');
+      if (relToSkill === 'SKILL.md' || relToSkill === 'SKILL.md.tmpl') return;
+      if (relToSkill.startsWith('sections/')) return;
+      if (!isSkillSupportFile(dir, relToSkill)) return;
+      const rel = `${dir}/${relToSkill}`;
+      results.push({ source: rel, output: rel, skillDir: dir });
+    });
+  }
+  return results.sort((a, b) => a.source.localeCompare(b.source));
+}
+
 export function discoverSkillFiles(root: string): string[] {
   const dirs = ['', ...subdirs(root)];
   const results: string[] = [];

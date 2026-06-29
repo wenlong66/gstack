@@ -4,6 +4,7 @@ import { SNAPSHOT_FLAGS } from '../browse/src/snapshot';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { CARVE_GUARDS } from './helpers/carve-guards';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const MAX_SKILL_DESCRIPTION_LENGTH = 1024;
@@ -1701,6 +1702,40 @@ describe('Codex generation (--host codex)', () => {
     }
   });
 
+  test('Codex carved skills include section files and manifests', () => {
+    for (const guard of Object.values(CARVE_GUARDS)) {
+      const codexName = guard.skill.startsWith('gstack-') ? guard.skill : `gstack-${guard.skill}`;
+      const sectionDir = path.join(AGENTS_DIR, codexName, 'sections');
+      expect(fs.existsSync(path.join(sectionDir, 'manifest.json'))).toBe(true);
+      for (const section of guard.expectedSections) {
+        expect(fs.existsSync(path.join(sectionDir, section))).toBe(true);
+      }
+    }
+  });
+
+  test('Codex generated skills include Markdown support files', () => {
+    const expected = [
+      'gstack-review/checklist.md',
+      'gstack-review/design-checklist.md',
+      'gstack-review/greptile-triage.md',
+      'gstack-review/TODOS-format.md',
+      'gstack-review/specialists/api-contract.md',
+      'gstack-review/specialists/data-migration.md',
+      'gstack-review/specialists/maintainability.md',
+      'gstack-review/specialists/performance.md',
+      'gstack-review/specialists/red-team.md',
+      'gstack-review/specialists/security.md',
+      'gstack-review/specialists/testing.md',
+      'gstack-qa/templates/qa-report-template.md',
+      'gstack-qa/references/issue-taxonomy.md',
+      'gstack-plan-devex-review/dx-hall-of-fame.md',
+    ];
+
+    for (const rel of expected) {
+      expect(fs.existsSync(path.join(AGENTS_DIR, rel))).toBe(true);
+    }
+  });
+
   test('root gstack bundle has OpenAI metadata for Codex skill browsing', () => {
     const rootMetadata = path.join(ROOT, 'agents', 'openai.yaml');
     expect(fs.existsSync(rootMetadata)).toBe(true);
@@ -1800,10 +1835,29 @@ describe('Codex generation (--host codex)', () => {
       stderr: 'pipe',
     });
     expect(result.exitCode).toBe(0);
-    const output = result.stdout.toString();
+    const output = result.stdout.toString().replace(/\\/g, '/');
     // Every Codex skill should be FRESH
     for (const skill of CODEX_SKILLS) {
       expect(output).toContain(`FRESH: .agents/skills/${skill.codexName}/SKILL.md`);
+    }
+    for (const guard of Object.values(CARVE_GUARDS)) {
+      const codexName = guard.skill.startsWith('gstack-') ? guard.skill : `gstack-${guard.skill}`;
+      for (const section of guard.expectedSections) {
+        expect(output).toContain(`FRESH: .agents/skills/${codexName}/sections/${section}`);
+      }
+      expect(output).toContain(`FRESH: .agents/skills/${codexName}/sections/manifest.json`);
+    }
+    for (const rel of [
+      'gstack-review/checklist.md',
+      'gstack-review/design-checklist.md',
+      'gstack-review/greptile-triage.md',
+      'gstack-review/TODOS-format.md',
+      'gstack-review/specialists/testing.md',
+      'gstack-qa/templates/qa-report-template.md',
+      'gstack-qa/references/issue-taxonomy.md',
+      'gstack-plan-devex-review/dx-hall-of-fame.md',
+    ]) {
+      expect(output).toContain(`FRESH: .agents/skills/${rel}`);
     }
     expect(output).not.toContain('STALE');
   });

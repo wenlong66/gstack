@@ -11,7 +11,7 @@
 
 import { COMMAND_DESCRIPTIONS } from '../browse/src/commands';
 import { SNAPSHOT_FLAGS } from '../browse/src/snapshot';
-import { discoverTemplates, discoverSectionTemplates } from './discover-skills';
+import { discoverTemplates, discoverSectionTemplates, discoverSectionStaticFiles, discoverSkillSupportFiles } from './discover-skills';
 import { writeLlmsTxt } from './gen-llms-txt';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -639,6 +639,16 @@ function extractHookSafetyProse(tmplContent: string): string | null {
 
 const GENERATED_HEADER = `<!-- AUTO-GENERATED from {{SOURCE}} — do not edit directly -->\n<!-- Regenerate: bun run gen:skill-docs -->\n`;
 
+function writeFileIfChanged(outputPath: string, content: string | Buffer): void {
+  const next = Buffer.isBuffer(content) ? content : Buffer.from(content);
+  if (fs.existsSync(outputPath)) {
+    const existing = fs.readFileSync(outputPath);
+    if (existing.equals(next)) return;
+  }
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, content);
+}
+
 /**
  * Apply a host's configured path + tool rewrites. Extracted so both SKILL.md
  * (via processExternalHost) and section files (via processSectionTemplate) get
@@ -787,9 +797,8 @@ function processExternalHost(
   // Config-driven: generate metadata (e.g., openai.yaml for Codex)
   if (hostConfig.generation.generateMetadata && !symlinkLoop) {
     const agentsDir = path.join(outputDir, 'agents');
-    fs.mkdirSync(agentsDir, { recursive: true });
     const shortDescription = condenseOpenAIShortDescription(extractedDescription);
-    fs.writeFileSync(path.join(agentsDir, 'openai.yaml'), generateOpenAIYaml(name, shortDescription));
+    writeFileIfChanged(path.join(agentsDir, 'openai.yaml'), generateOpenAIYaml(name, shortDescription));
   }
 
   return { content: result, outputPath, outputDir, symlinkLoop };
@@ -927,6 +936,42 @@ function processSectionTemplate(
 
 // ─── Main ───────────────────────────────────────────────────
 
+function sectionStaticOutputPath(
+  sourcePath: string,
+  skillDir: string,
+  host: Host = 'claude',
+): string {
+  const fileName = path.basename(sourcePath);
+  if (host === 'claude') {
+    return path.join(OUT_DIR || ROOT, skillDir, 'sections', fileName);
+  }
+
+  const hostConfig = getHostConfig(host);
+  const parentTmplPath = path.join(ROOT, skillDir, 'SKILL.md.tmpl');
+  const parentContent = fs.existsSync(parentTmplPath) ? fs.readFileSync(parentTmplPath, 'utf-8') : '';
+  const parentName = (parentContent && extractNameAndDescription(parentContent).name) || skillDir;
+  const externalName = externalSkillName(skillDir, parentName);
+  return path.join(ROOT, hostConfig.hostSubdir, 'skills', externalName, 'sections', fileName);
+}
+
+function supportFileOutputPath(
+  sourcePath: string,
+  skillDir: string,
+  host: Host,
+): string {
+  const relWithinSkill = path.relative(path.join(ROOT, skillDir), sourcePath);
+  if (host === 'claude') {
+    return path.join(ROOT, skillDir, relWithinSkill);
+  }
+
+  const hostConfig = getHostConfig(host);
+  const parentTmplPath = path.join(ROOT, skillDir, 'SKILL.md.tmpl');
+  const parentContent = fs.existsSync(parentTmplPath) ? fs.readFileSync(parentTmplPath, 'utf-8') : '';
+  const parentName = (parentContent && extractNameAndDescription(parentContent).name) || skillDir;
+  const externalName = externalSkillName(skillDir, parentName);
+  return path.join(ROOT, hostConfig.hostSubdir, 'skills', externalName, relWithinSkill);
+}
+
 function findTemplates(): string[] {
   return discoverTemplates(ROOT).map(t => path.join(ROOT, t.tmpl));
 }
@@ -994,10 +1039,7 @@ for (const currentHost of hostsToRun) {
           console.log(`FRESH: ${relOutput}`);
         }
       } else {
-        // In-place writes land in existing dirs; --out-dir needs the mirrored
-        // skill dir created first.
-        if (OUT_DIR) fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-        fs.writeFileSync(outputPath, content);
+        writeFileIfChanged(outputPath, content);
         console.log(`GENERATED: ${relOutput}`);
       }
 
@@ -1020,13 +1062,11 @@ for (const currentHost of hostsToRun) {
     }
 
     // ─── Section generation (v2 plan T9, Claude-first carve) ───
-    // On-demand sections/*.md for carved skills. Generated for CLAUDE ONLY:
-    // every other host inlines section content via the {{SECTION:id}} resolver
-    // (keeping the full monolith skill), so they need no section files and we
-    // sidestep host-portable section paths until that plumbing lands. No-op for
-    // any skill without a sections/ dir. Mirrors the SKILL.md DRY_RUN handling so
-    // sections participate in the freshness gate.
-    for (const sec of currentHost === 'claude' ? discoverSectionTemplates(ROOT) : []) {
+    // On-demand sections/*.md for carved skills. Generate these for every host:
+    // external host skeletons can route to `sections/*.md`, so the shipped skill
+    // directory must carry the same section files as the canonical skill. Mirrors
+    // the SKILL.md DRY_RUN handling so sections participate in the freshness gate.
+    for (const sec of discoverSectionTemplates(ROOT)) {
       if (currentHostConfig.generation.includeSkills?.length &&
           !currentHostConfig.generation.includeSkills.includes(sec.skillDir)) continue;
       if (currentHostConfig.generation.skipSkills?.length &&
@@ -1044,7 +1084,7 @@ for (const currentHost of hostsToRun) {
           console.log(`FRESH: ${relOutput}`);
         }
       } else {
-        fs.writeFileSync(outputPath, content);
+        writeFileIfChanged(outputPath, content);
         console.log(`GENERATED: ${relOutput}`);
       }
 
@@ -1053,6 +1093,61 @@ for (const currentHost of hostsToRun) {
         lines: content.split('\n').length,
         tokens: Math.round(content.length / 4),
       });
+    }
+
+    // Static section sidecars (for example manifest.json) are not template
+    // rendered, but generated host directories still need them for completeness.
+    for (const staticFile of discoverSectionStaticFiles(ROOT)) {
+      if (currentHostConfig.generation.includeSkills?.length &&
+          !currentHostConfig.generation.includeSkills.includes(staticFile.skillDir)) continue;
+      if (currentHostConfig.generation.skipSkills?.length &&
+          currentHostConfig.generation.skipSkills.includes(staticFile.skillDir)) continue;
+
+      const sourcePath = path.join(ROOT, staticFile.source);
+      const outputPath = sectionStaticOutputPath(sourcePath, staticFile.skillDir, currentHost);
+      const relOutput = path.relative(OUT_DIR || ROOT, outputPath);
+      const sourceContent = fs.readFileSync(sourcePath);
+
+      if (DRY_RUN) {
+        const existing = fs.existsSync(outputPath) ? fs.readFileSync(outputPath) : Buffer.alloc(0);
+        if (!existing.equals(sourceContent)) {
+          console.log(`STALE: ${relOutput}`);
+          hasChanges = true;
+        } else {
+          console.log(`FRESH: ${relOutput}`);
+        }
+      } else {
+        writeFileIfChanged(outputPath, sourceContent);
+        console.log(`GENERATED: ${relOutput}`);
+      }
+    }
+
+    if (currentHost !== 'claude') {
+      for (const supportFile of discoverSkillSupportFiles(ROOT)) {
+        if (currentHostConfig.generation.includeSkills?.length &&
+            !currentHostConfig.generation.includeSkills.includes(supportFile.skillDir)) continue;
+        if (currentHostConfig.generation.skipSkills?.length &&
+            currentHostConfig.generation.skipSkills.includes(supportFile.skillDir)) continue;
+
+        const sourcePath = path.join(ROOT, supportFile.source);
+        const outputPath = supportFileOutputPath(sourcePath, supportFile.skillDir, currentHost);
+        const relOutput = path.relative(OUT_DIR || ROOT, outputPath);
+        const sourceContent = fs.readFileSync(sourcePath, 'utf-8');
+        const content = applyHostRewrites(sourceContent, currentHostConfig);
+
+        if (DRY_RUN) {
+          const existing = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf-8') : '';
+          if (existing !== content) {
+            console.log(`STALE: ${relOutput}`);
+            hasChanges = true;
+          } else {
+            console.log(`FRESH: ${relOutput}`);
+          }
+        } else {
+          writeFileIfChanged(outputPath, content);
+          console.log(`GENERATED: ${relOutput}`);
+        }
+      }
     }
 
     // Generate gstack-lite and gstack-full for OpenClaw host

@@ -422,6 +422,7 @@ gstack-brain-init
 | 文档 | 覆盖内容 |
 |------|----------|
 | [Skill Deep Dives](docs/skills.md) | 每个 skill 的哲学、示例和工作流（包含 Greptile 集成） |
+| [游戏开发使用指南](zh-game-usage.md) | 面向游戏项目的中文技能选择、使用方式和工作流 |
 | [Builder Ethos](ETHOS.md) | Builder 哲学：Boil the Lake、Search Before Building、三层知识模型 |
 | [Using GBrain with GStack](USING_GBRAIN_WITH_GSTACK.md) | `/setup-gbrain` 的所有路径、flag、bin helper 和排障步骤 |
 | [GBrain Sync](docs/gbrain-sync.md) | 跨机器记忆设置、隐私模式、故障排查 |

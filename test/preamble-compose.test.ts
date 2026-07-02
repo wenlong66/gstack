@@ -83,7 +83,7 @@ describe('Conductor signal (preamble bash)', () => {
   test('codex preamble can resolve runtime root from Codex plugin cache', () => {
     const out = generatePreamble(makeCtx('codex', 1, 'claude'));
     expect(out).toContain('GSTACK_ROOT="${GSTACK_ROOT:-$HOME/.codex/skills/gstack}"');
-    expect(out).toContain('"$HOME/.codex/plugins/cache"/*/gstack/*/.agents/skills/gstack');
+    expect(out).toContain('"$HOME/.codex/plugins/cache"/*/gstack/*/skills/gstack');
     expect(out).toContain('[ -x "$_GSTACK_CAND/bin/gstack-config" ] && GSTACK_ROOT="$_GSTACK_CAND" && break');
   });
 

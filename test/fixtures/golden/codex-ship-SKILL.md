@@ -17,7 +17,7 @@ _ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 GSTACK_ROOT="${GSTACK_ROOT:-$HOME/.codex/skills/gstack}"
 [ -n "$_ROOT" ] && [ -d "$_ROOT/.agents/skills/gstack" ] && GSTACK_ROOT="$_ROOT/.agents/skills/gstack"
 if [ ! -x "$GSTACK_ROOT/bin/gstack-config" ]; then
-  for _GSTACK_CAND in "$HOME/.codex/plugins/cache"/*/gstack/*/.agents/skills/gstack; do
+  for _GSTACK_CAND in "$HOME/.codex/plugins/cache"/*/gstack/*/skills/gstack; do
     [ -x "$_GSTACK_CAND/bin/gstack-config" ] && GSTACK_ROOT="$_GSTACK_CAND" && break
   done
 fi

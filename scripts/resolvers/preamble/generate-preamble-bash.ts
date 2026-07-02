@@ -5,7 +5,7 @@ export function generatePreambleBash(ctx: TemplateContext): string {
   const hostConfig = getHostConfig(ctx.host);
   const pluginCacheFallback = ctx.host === 'codex'
     ? `if [ ! -x "$GSTACK_ROOT/bin/gstack-config" ]; then
-  for _GSTACK_CAND in "$HOME/.codex/plugins/cache"/*/gstack/*/.agents/skills/gstack; do
+  for _GSTACK_CAND in "$HOME/.codex/plugins/cache"/*/gstack/*/skills/gstack; do
     [ -x "$_GSTACK_CAND/bin/gstack-config" ] && GSTACK_ROOT="$_GSTACK_CAND" && break
   done
 fi

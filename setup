@@ -771,7 +771,6 @@ link_codex_skill_dirs() {
   # '.claude/skills/gstack|${CLAUDE_PLUGIN_ROOT}'
   # '.claude/skills/review|${CLAUDE_PLUGIN_ROOT}/review'
   # '.claude/skills|${CLAUDE_PLUGIN_ROOT}/skills'
-  # '$_ROOT/.claude/skills/gstack|${CLAUDE_PLUGIN_ROOT}'
 
 CLAUDE_PLUGIN_PATH_REWRITES=(
   '$HOME/.claude/skills/gstack|${CLAUDE_PLUGIN_ROOT}'

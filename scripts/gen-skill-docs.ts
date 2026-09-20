@@ -11,6 +11,8 @@
 
 import { discoverTemplates, discoverSectionTemplates } from './discover-skills';
 import { writeLlmsTxt } from './gen-llms-txt';
+import { generateDesignChecklistMd } from './resolvers/design-checklist';
+import { DOM_DUMP_SCRIPT, DOM_DUMP_FILE } from '../lib/dom-dump-script';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Host, TemplateContext } from './resolvers/types';
@@ -815,7 +817,7 @@ function processExternalHost(
   const claudePath = ctx.tmplPath.replace(/\.tmpl$/, '');
   try {
     const resolvedClaude = fs.realpathSync(claudePath);
-    const resolvedExternal = fs.realpathSync(path.dirname(outputPath)) + '/' + path.basename(outputPath);
+    const resolvedExternal = path.join(fs.realpathSync(path.dirname(outputPath)), path.basename(outputPath));
     if (resolvedClaude === resolvedExternal) {
       symlinkLoop = true;
     }
@@ -992,6 +994,30 @@ function findTemplates(): string[] {
 const ALL_HOSTS: Host[] = ALL_HOST_NAMES as Host[];
 
 /**
+ * Write one generated file, or under DRY_RUN compare it to what is on disk and
+ * print STALE/FRESH. Returns true when the file is stale (dry run) — the caller
+ * folds that into its host-level `hasChanges`. Shared by sections and the
+ * lib-derived assets; the SKILL.md loop keeps its own copy because it also
+ * handles symlink loops and the token budget.
+ */
+function emitGenerated(outputPath: string, content: string): boolean {
+  const relOutput = path.relative(OUT_DIR || ROOT, outputPath);
+  if (DRY_RUN) {
+    const existing = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf-8') : '';
+    if (existing !== content) {
+      console.log(`STALE: ${relOutput}`);
+      return true;
+    }
+    console.log(`FRESH: ${relOutput}`);
+    return false;
+  }
+  if (OUT_DIR) fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, content);
+  console.log(`GENERATED: ${relOutput}`);
+  return false;
+}
+
+/**
  * The generator's whole executable body. Import-purity contract: importing
  * this module must NEVER touch the tree — test/gen-skill-docs.test.ts pulls
  * assertSinglePreamble via require(), test/catalog-trim.test.ts imports
@@ -1003,6 +1029,7 @@ const ALL_HOSTS: Host[] = ALL_HOST_NAMES as Host[];
  * Returns the process exit code. Kept synchronous so the module stays
  * require()-able (see the llms.txt IIFE note below).
  */
+
 export function main(): number {
 const hostsToRun: Host[] = HOST_ARG_VAL === 'all' ? ALL_HOSTS : [HOST];
 const failures: { host: string; error: Error }[] = [];
@@ -1081,26 +1108,33 @@ for (const currentHost of hostsToRun) {
 
       const { outputPath, content } = processSectionTemplate(path.join(ROOT, sec.tmpl), sec.skillDir, currentHost);
       const relOutput = path.relative(OUT_DIR || ROOT, outputPath);
-
-      if (DRY_RUN) {
-        const existing = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf-8') : '';
-        if (existing !== content) {
-          console.log(`STALE: ${relOutput}`);
-          hasChanges = true;
-        } else {
-          console.log(`FRESH: ${relOutput}`);
-        }
-      } else {
-        if (OUT_DIR) fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-        fs.writeFileSync(outputPath, content);
-        console.log(`GENERATED: ${relOutput}`);
-      }
+      if (emitGenerated(outputPath, content)) hasChanges = true;
 
       tokenBudget.push({
         skill: relOutput,
         lines: content.split('\n').length,
         tokens: Math.round(content.length / 4),
       });
+    }
+
+    // ─── review/design-checklist.md (generated from lib/design-catalog.ts) ───
+    // A Claude-side runtime asset: setup links it from review/ and the other
+    // hosts copy or inline the Claude render (hosts/opencode.ts), so it is
+    // written for the CLAUDE host only. Honors OUT_DIR (outputs-only rule) and
+    // takes part in the DRY_RUN freshness gate exactly like sections above.
+    if (currentHost === 'claude'
+        && !(currentHostConfig.generation.includeSkills?.length && !currentHostConfig.generation.includeSkills.includes('review'))
+        && !currentHostConfig.generation.skipSkills?.includes('review')) {
+      // Two runtime assets derived from lib/ source: the checklist (from the
+      // catalog) and the DOM-dump script the browser engines load at runtime
+      // (from lib/dom-dump-script.ts, so the prose never carries the script).
+      const generatedAssets: Array<[string, string]> = [
+        [path.join('review', 'design-checklist.md'), generateDesignChecklistMd()],
+        [DOM_DUMP_FILE, DOM_DUMP_SCRIPT + '\n'],
+      ];
+      for (const [rel, content] of generatedAssets) {
+        if (emitGenerated(path.join(OUT_DIR ?? ROOT, rel), content)) hasChanges = true;
+      }
     }
 
     // Generate the OpenClaw orchestrator-injection docs (gstack-lite / gstack-full /
@@ -1191,6 +1225,9 @@ if (!DRY_RUN) {
     try { entries = fs.readdirSync(skillsRoot, { withFileTypes: true }); } catch { continue; }
     for (const e of entries) {
       if (e.isSymbolicLink() || !e.isDirectory() || !e.name.startsWith('gstack-') || names.has(e.name)) continue;
+      // setup migrates installed links/copies before retiring this renamed render.
+      // A failed migration must remain usable through later build/generation passes.
+      if (e.name === 'gstack-claude' && process.env.GSTACK_DEFER_CLAUDE_RENAME_PRUNE === '1') continue;
       // Only a directory we provably rendered (the generated banner in its
       // SKILL.md) may be deleted whole — a hand-authored gstack-* dir is kept.
       let generated = false;
@@ -1198,6 +1235,9 @@ if (!DRY_RUN) {
       if (!generated) { console.log(`  kept ${host} skills/${e.name}: not a gstack render (no generated banner)`); continue; }
       fs.rmSync(path.join(skillsRoot, e.name), { recursive: true, force: true });
       console.log(`  pruned stale ${host} render: ${e.name}`);
+      if (e.name === 'gstack-claude') {
+        console.log('  /claude is now /claude-code. Run ./setup to migrate installed skill links; generation only updates render files.');
+      }
     }
   }
 }

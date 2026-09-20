@@ -235,6 +235,7 @@ At session start or after compaction, recover recent project context.
 
 ```bash
 eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
+_BRANCH=$(git branch --show-current 2>/dev/null | tr -cd 'a-zA-Z0-9._/-') || :; _BRANCH=${_BRANCH:-unknown}
 _PROJ="${GSTACK_HOME:-$HOME/.gstack}/projects/${SLUG:-unknown}"
 if [ -d "$_PROJ" ]; then
   echo "--- RECENT ARTIFACTS ---"
@@ -260,7 +261,7 @@ fi
 
 If artifacts are listed, read the newest useful one. If `LAST_SESSION` or `LATEST_CHECKPOINT` appears, give a 2-sentence welcome back summary. If `RECENT_PATTERN` clearly implies a next skill, suggest it once.
 
-**Cross-session decisions.** If `ACTIVE DECISIONS` are listed, treat them as prior settled calls with their rationale — do not silently re-litigate them; if you're about to reverse one, say so explicitly. Reach for `~/.claude/skills/gstack/bin/gstack-decision-search` whenever a question touches a past decision ("what did we decide / why / did we try"). When you or the user make a DURABLE decision (architecture, scope, tool/vendor choice, or a reversal) — NOT a turn-level or trivial choice — log it with `~/.claude/skills/gstack/bin/gstack-decision-log` (`--supersede <id>` for a reversal). Reliable and local; gbrain not required.
+**Cross-session decisions.** Honor listed `ACTIVE DECISIONS` and their rationale; do not silently re-litigate them, and announce planned reversals. Use `~/.claude/skills/gstack/bin/gstack-decision-search` for past-decision questions. Log DURABLE decisions by you or the user (architecture, scope, tool/vendor choice, reversal; not trivial or turn-level choices) with `~/.claude/skills/gstack/bin/gstack-decision-log` (`--supersede <id>` for reversals). Reliable and local; gbrain not required.
 
 ## Writing Style (skip entirely if `EXPLAIN_LEVEL: terse` appears in the preamble echo OR the user's current message explicitly requests terse / no-explanations output)
 
@@ -570,6 +571,7 @@ console.log("GSTACK_STEP_OK");
 Then copy the screenshot out of the printed session directory: `cp "<ASIDE_DIR>/<page-name>.jpg" .gstack/canary-reports/baselines/<page-name>.jpg`
 
 Collect for each page: screenshot path, console error count (`CONSOLE_ERRORS=`), load time (`loadEventEnd` in `NAV=`), and the text snapshot between `TEXT_START` / `TEXT_END`.
+Also run Phase 3's read-only link check for each monitored page and retain the URLs whose `LINK` status is 404. Repeat the same check each monitoring round; other HEAD failures are unknown, not broken links. Compare console messages by identity, not just count, and retain the text snapshot for evidence when a page's content disappears.
 
 Save the baseline manifest to `.gstack/canary-reports/baseline.json`:
 
@@ -582,7 +584,10 @@ Save the baseline manifest to `.gstack/canary-reports/baseline.json`:
     "/": {
       "screenshot": "baselines/home.jpg",
       "console_errors": 0,
-      "load_time_ms": 450
+      "console_error_messages": [],
+      "load_time_ms": 450,
+      "broken_links": [],
+      "text_snapshot": "<TEXT_START/END content>"
     }
   }
 }
@@ -620,11 +625,12 @@ For each page to monitor:
 
 Run the Phase 2 read script for each page with the screenshot saved as `pre-<page-name>.jpg`, then `cp "<ASIDE_DIR>/pre-<page-name>.jpg" .gstack/canary-reports/screenshots/`.
 
-Record the console error count and load time for each page. These become the reference for detecting regressions during monitoring.
+Save the same manifest schema as Phase 2 to `.gstack/canary-reports/pre-monitor.json`, with the screenshots' actual paths. This is a monitoring-start reference, not evidence of pre-deploy health. Use it when no baseline exists; never overwrite an existing baseline during monitoring.
 
 ### Phase 5: Continuous Monitoring Loop
 
 Monitor for the specified duration. Every 60 seconds, check each page. Nothing persists between scripts — every check re-opens the page from its URL and captures fresh evidence:
+Record the start and deadline. After each full round, wait `max(0, 60 - elapsed-round-seconds)` seconds using the host's wait tool or `sleep`. If a round exceeds 60 seconds, start the next immediately and report the actual cadence; never overlap rounds. Stop at the deadline after the current round.
 
 ```bash
 aside repl '
@@ -655,7 +661,7 @@ After each check, compare results against the baseline (or pre-deploy snapshot):
 
 **Don't cry wolf.** Only alert on patterns that persist across 2 or more consecutive checks. A single transient network blip is not an alert.
 
-**If a CRITICAL or HIGH alert is detected**, immediately notify the user via AskUserQuestion:
+**After a CRITICAL or HIGH pattern is confirmed on two consecutive checks**, immediately notify the user via AskUserQuestion. A first occurrence is pending, not yet an alert:
 
 ```
 CANARY ALERT
@@ -702,6 +708,7 @@ VERDICT: [DEPLOY IS HEALTHY / DEPLOY HAS ISSUES — details above]
 ```
 
 Save report to `.gstack/canary-reports/{date}-canary.md` and `.gstack/canary-reports/{date}-canary.json`.
+Per-page and overall status: BROKEN if any confirmed CRITICAL alert occurred; otherwise DEGRADED if any confirmed alert occurred; otherwise HEALTHY. Note resolved incidents separately without erasing them from the run's status. JSON fields: `url`, `started_at`, `ended_at`, `status`, `pages` (URL, checks, latest metrics, status), and `alerts` (severity, URL, first_seen, confirmed_at, evidence, resolved). Unconfirmed transients go in a separate `observations` array.
 
 Log the result for the review dashboard:
 
@@ -711,6 +718,7 @@ mkdir -p ~/.gstack/projects/$SLUG
 ```
 
 Write a JSONL entry: `{"skill":"canary","timestamp":"<ISO>","status":"<HEALTHY/DEGRADED/BROKEN>","url":"<url>","duration_min":<N>,"alerts":<N>}`
+Append it to `~/.gstack/projects/$SLUG/canary-history.jsonl`; never overwrite history.
 
 ### Phase 7: Baseline Update
 

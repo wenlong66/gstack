@@ -18,7 +18,23 @@ import {
   GLOBAL_TOUCHFILES,
 } from './helpers/touchfiles';
 
+import { paidTestClosure, isCovered } from './helpers/touchfile-closure';
+import { readWorkflowExcerpt } from './helpers/workflow-excerpt';
+import { sharedLibsPlanExcerpt } from './helpers/shared-libs-plan-excerpt';
+
 const ROOT = path.resolve(import.meta.dir, '..');
+const SHIP_GUARD_ONLY = ['ship-managed-hook-refresh', 'ship-unmanaged-hook-consent', 'ship-local-hook-preservation'];
+
+function registeredJudgeTestNames(source: string): string[] {
+  // Inspect registrations, not arbitrary `name` fields such as Error.name.
+  const registrations = [...source.matchAll(/^\s*testIfSelected\s*\(/gm)];
+  const names = [...source.matchAll(/^\s*testIfSelected\s*\(\s*(['"`])([^'"`\r\n]+)\1\s*,/gm)]
+    .map(match => match[2]);
+  if (names.length !== registrations.length) {
+    throw new Error('LLM-judge test registrations must use literal case names for the TOUCHFILES inventory');
+  }
+  return [...new Set(names)];
+}
 
 // --- matchGlob ---
 
@@ -61,6 +77,165 @@ describe('matchGlob', () => {
 // --- selectTests ---
 
 describe('selectTests', () => {
+  test('learnings rendering selects the Eng workflow consumers without unrelated review cases', () => {
+    expect(fs.readFileSync(path.join(ROOT, 'plan-eng-review/sections/review-sections.md.tmpl'), 'utf8'))
+      .toContain('{{LEARNINGS_SEARCH}}');
+    const consumers = selectTests(['plan-eng-review/sections/review-sections.md'], E2E_TOUCHFILES).selected
+      // These cases use an outside-only/Code Quality excerpt or descriptive metadata.
+      .filter(id => !['outside-plan-disabled-no-fallback', 'plan-ceo-review-prosons-cadence',
+        'plan-review-prosons-format', 'shared-libs-plan-callers'].includes(id));
+    const existing = ['learnings-show'];
+    const result = selectTests(['scripts/resolvers/learnings.ts'], E2E_TOUCHFILES);
+    expect(result.reason).toBe('diff');
+    expect(result.selected.sort()).toEqual([...new Set([...consumers, ...existing])].sort());
+    expect(result.selected).toContain('plan-eng-review');
+    expect(result.selected).not.toContain('plan-ceo-review-prosons-cadence');
+    expect(result.selected).not.toContain('outside-plan-disabled-no-fallback');
+  });
+
+  test('learnings rendering selects the Eng judge that consumes the changed instruction', () => {
+    const result = selectTests(['scripts/resolvers/learnings.ts'], LLM_JUDGE_TOUCHFILES);
+    expect(result.reason).toBe('diff');
+    expect(result.selected).toEqual(['plan-eng-review/SKILL.md sections']);
+  });
+
+  test.each(['bin/gstack-paths', 'bin/gstack-slug', 'scripts/resolvers/design.ts'])(
+    'Design artifact dependencies select their native consumers: %s', (file) => {
+      const result = selectTests([file], E2E_TOUCHFILES);
+      expect(result.reason).toBe('diff');
+      expect(result.selected).toContain('plan-design-with-ui-scope');
+      expect(E2E_TIERS['plan-design-with-ui-scope']).toBe('gate');
+    },
+  );
+
+  test.each(['test/helpers/owned-claude-transcript.ts'])(
+    'native completion changes select the Design UI gate: %s', (file) => {
+      const result = selectTests([file], E2E_TOUCHFILES);
+      expect(result.selected).toContain('plan-design-with-ui-scope');
+      expect(E2E_TIERS['plan-design-with-ui-scope']).toBe('gate');
+    },
+  );
+
+  test.each(['lib/cso/cli.ts', 'lib/cso/state.ts'])(
+    'CSO runtime and report regressions select all three audit cases: %s', (file) => {
+      const result = selectTests([file], E2E_TOUCHFILES);
+      expect(result.reason).toBe('diff');
+      expect(result.selected.sort()).toEqual(['cso-diff-mode', 'cso-full-audit', 'cso-infra-scope']);
+      expect(E2E_TIERS['cso-diff-mode']).toBe('gate');
+      expect(E2E_TIERS['cso-full-audit']).toBe('periodic');
+      expect(E2E_TIERS['cso-infra-scope']).toBe('periodic');
+    },
+  );
+
+  test.each(['lib/redact-engine.ts', 'lib/redact-patterns.ts'])(
+    'shared redaction changes retain CSO audit consumers: %s', (file) => {
+      const result = selectTests([file], E2E_TOUCHFILES);
+      for (const id of ['cso-diff-mode', 'cso-full-audit', 'cso-infra-scope']) {
+        expect(result.selected).toContain(id);
+      }
+    },
+  );
+
+  test('testing resolver source selects the same E2E consumers as its generated content', () => {
+    const consumers = [
+      ['plan-eng-review/sections/review-sections.md', 'TEST_COVERAGE_AUDIT_PLAN'],
+      ['ship/sections/tests.md', 'TEST_BOOTSTRAP'],
+      ['ship/sections/test-coverage.md', 'TEST_COVERAGE_AUDIT_SHIP'],
+      ['design-review/SKILL.md', 'TEST_BOOTSTRAP'],
+    ];
+    for (const [output, token] of consumers) {
+      expect(fs.readFileSync(path.join(ROOT, `${output}.tmpl`), 'utf8')).toContain(`{{${token}}}`);
+    }
+    const generated = selectTests(consumers.map(([output]) => output), E2E_TOUCHFILES);
+    // The bounded Code Quality fixture stops before Test review.
+    const expected = [...new Set(generated.selected.filter(id => id !== 'shared-libs-plan-callers' && !SHIP_GUARD_ONLY.includes(id)))].sort();
+    const actual = selectTests(['scripts/resolvers/testing.ts'], E2E_TOUCHFILES);
+    expect(actual.reason).toBe('diff');
+    expect(actual.selected.sort()).toEqual(expected);
+    for (const id of ['plan-eng-multi-finding-batching',
+      'plan-eng-review-format-coverage', 'ship-section-loading']) {
+      expect(actual.selected).toContain(id);
+      expect(E2E_TIERS[id]).toBe('periodic');
+    }
+    for (const id of ['plan-eng-coverage-audit', 'ship-coverage-audit']) {
+      expect(actual.selected).toContain(id);
+      expect(E2E_TIERS[id]).toBe('gate');
+    }
+    for (const unrelated of ['browse-basic', 'retro', 'office-hours-section-loading', 'review-coverage-audit', 'qa-fix-loop', 'qa-quick']) {
+      expect(actual.selected).not.toContain(unrelated);
+    }
+  });
+
+  test('testing resolver does not select guard-only ship actors', () => {
+    const resolver = selectTests(['scripts/resolvers/testing.ts'], E2E_TOUCHFILES);
+    const ship = selectTests(['ship/SKILL.md'], E2E_TOUCHFILES);
+    for (const id of SHIP_GUARD_ONLY) {
+      expect(ship.selected).toContain(id);
+      expect(resolver.selected).not.toContain(id);
+    }
+  });
+
+  test('testing resolver source selects only judges that consume its generated workflow text', () => {
+    const result = selectTests(['scripts/resolvers/testing.ts'], LLM_JUDGE_TOUCHFILES);
+    expect(result.reason).toBe('diff');
+    expect(result.selected.sort()).toEqual(['plan-eng-review/SKILL.md sections', 'ship/SKILL.md workflow']);
+  });
+
+  test('bounded shared-code planning selects its consumed resolvers, excluding other Eng sections', () => {
+    const entrypoint = fs.readFileSync(path.join(ROOT, 'plan-eng-review/SKILL.md'), 'utf8');
+    const review = fs.readFileSync(path.join(ROOT, 'plan-eng-review/sections/review-sections.md'), 'utf8');
+    const excerpt = sharedLibsPlanExcerpt(entrypoint, review);
+    for (const [start, end] of [
+      ['## Prior Learnings', '## Retrospective learning'],
+      ['### 3. Test review', '### 4. Performance review'],
+    ]) {
+      const begin = review.indexOf(start), finish = review.indexOf(end, begin);
+      expect(begin).toBeGreaterThan(0);
+      expect(finish).toBeGreaterThan(begin);
+      const changed = review.slice(0, begin + start.length) + '\nChanged excluded instructions.\n' + review.slice(finish);
+      expect(sharedLibsPlanExcerpt(entrypoint, changed)).toBe(excerpt);
+    }
+    for (const source of ['scripts/resolvers/learnings.ts', 'scripts/resolvers/testing.ts']) {
+      expect(selectTests([source], E2E_TOUCHFILES).selected).not.toContain('shared-libs-plan-callers');
+    }
+    expect(excerpt).toContain('## Confidence Calibration');
+    expect(excerpt).toContain('## AskUserQuestion Format');
+    expect(excerpt).toContain('### Shared-code evaluation rubric');
+    for (const source of ['scripts/resolvers/confidence.ts',
+      'scripts/resolvers/preamble/generate-ask-user-format.ts', 'scripts/resolvers/shared-libs.ts',
+      'test/helpers/shared-libs-plan-excerpt.ts']) {
+      expect(selectTests([source], E2E_TOUCHFILES).selected).toContain('shared-libs-plan-callers');
+    }
+  });
+
+  test.each([
+    ['plan-eng-review/sections/review-sections.md', 'plan-eng-review/SKILL.md sections',
+      'plan-eng-review/SKILL.md', '## Scope gate', '## Section self-check', '### REGRESSION RULE (mandatory)'],
+    ['ship/sections/tests.md', 'ship/SKILL.md workflow',
+      'ship/SKILL.md', '# Ship:', '## Important Rules', '## Test Framework Bootstrap'],
+    ['ship/sections/test-coverage.md', 'ship/SKILL.md workflow',
+      'ship/SKILL.md', '# Ship:', '## Important Rules', '### REGRESSION RULE (mandatory)'],
+    ['plan-design-review/sections/review-sections.md', 'plan-design-review/SKILL.md passes',
+      'plan-design-review/SKILL.md', '## Review Sections', '## CRITICAL RULE',
+      '## Review Sections (7 passes, after scope is agreed)'],
+  ])('expanded judge content remains selected by its section alone: %s', (file, judge, skill, start, end, marker) => {
+    const body = fs.readFileSync(path.join(ROOT, file), 'utf8').replace(/^<!--[^\n]*-->\n/gm, '').trim();
+    const paragraph = body.split(`${marker}\n\n`)[1]?.split('\n\n')[0];
+    expect(paragraph?.length).toBeGreaterThan(100);
+    expect(readWorkflowExcerpt(skill, start, end)).toContain(`${marker}\n\n${paragraph}`);
+    for (const changed of [file, `${file}.tmpl`]) {
+      expect(selectTests([changed], LLM_JUDGE_TOUCHFILES).selected).toEqual([judge]);
+    }
+  });
+
+  test.each(['scripts/resolvers/design.ts', 'scripts/resolvers/review.ts'])(
+    'Design rendering source selects its workflow judge: %s', (file) => {
+      const result = selectTests([file], LLM_JUDGE_TOUCHFILES);
+      expect(result.reason).toBe('diff');
+      expect(result.selected).toContain('plan-design-review/SKILL.md passes');
+    });
+
+
   test('browse/src change selects browse and qa tests', () => {
     const result = selectTests(['browse/src/commands.ts'], E2E_TOUCHFILES);
     expect(result.selected).toContain('browse-basic');
@@ -87,6 +262,17 @@ describe('selectTests', () => {
     expect(result.selected).not.toContain('retro');
   });
 
+  test('mode-question capture dependencies select its native gate', () => {
+    for (const file of [
+      'test/helpers/agent-sdk-runner.ts', 'test/helpers/auq-native-capture.ts',
+      'test/helpers/hermetic-env.ts', 'test/helpers/eval-store.ts',
+      'lib/claude-bin.ts',
+    ]) {
+      expect(selectTests([file], E2E_TOUCHFILES).selected).toContain('auq-format-gate');
+    }
+  });
+
+
   test('skill-specific change selects only that skill and related tests', () => {
     const result = selectTests(['plan-ceo-review/SKILL.md'], E2E_TOUCHFILES);
     expect(result.selected).toContain('plan-ceo-review');
@@ -106,9 +292,8 @@ describe('selectTests', () => {
     // v1.13.x real-PTY E2E batch entries that also depend on plan-ceo-review/**
     expect(result.selected).toContain('auq-format-gate');
     expect(result.selected).toContain('plan-ceo-mode-routing');
-    expect(result.selected).toContain('autoplan-chain-pty');
-    // Per-finding count + review-report-at-bottom (v1.21.x)
-    expect(result.selected).toContain('plan-ceo-finding-count');
+    // The dual-voice fixture loads the CEO skill as its Phase 1 dependency.
+    expect(result.selected).toContain('autoplan-dual-voice');
     // v1.22+ AskUserQuestion-blocked regression: auto-decide-preserved
     // also depends on plan-ceo-review/** (autoplan-auto-mode test was
     // removed in v1.28 — see commit message for the rationale).
@@ -122,24 +307,29 @@ describe('selectTests', () => {
     // v2 plan Phase B carve: the section-loading E2E depends on plan-ceo-review/**.
     expect(result.selected).toContain('plan-ceo-section-loading');
     expect(result.selected).toContain('outside-plan-disabled-no-fallback');
-    expect(result.selected.length).toBe(22);
-    expect(result.skipped.length).toBe(Object.keys(E2E_TOUCHFILES).length - 22);
+    expect(result.selected.length).toBe(21);
+    expect(result.skipped.length).toBe(Object.keys(E2E_TOUCHFILES).length - 21);
   });
 
   test('global touchfile triggers ALL tests', () => {
-    const result = selectTests(['test/helpers/session-runner.ts'], E2E_TOUCHFILES);
-    expect(result.selected.length).toBe(Object.keys(E2E_TOUCHFILES).length);
-    expect(result.skipped.length).toBe(0);
-    expect(result.reason).toContain('global');
+    for (const file of ['test/helpers/session-runner.ts', 'scripts/test-strict-output.ts']) {
+      const result = selectTests([file], E2E_TOUCHFILES);
+      expect(result.selected.length).toBe(Object.keys(E2E_TOUCHFILES).length);
+      expect(result.skipped.length).toBe(0);
+      expect(result.reason).toContain('global');
+    }
   });
 
-  test('section-capture tool isolation regression selects only its three capture workflows', () => {
-    const result = selectTests(['test/session-runner-tools.test.ts'], E2E_TOUCHFILES);
-    expect(result.selected.sort()).toEqual([
-      'carve-section-loading', 'plan-ceo-section-loading', 'ship-section-loading',
-    ]);
+  test.each([
+    'test/helpers/hermetic-skill-runtime.ts',
+    'lib/fs-atomic.ts',
+  ])('live runtime dependency selects PTY consumers: %s', (file) => {
+    const result = selectTests([file], E2E_TOUCHFILES);
     expect(result.reason).toBe('diff');
+    expect(result.selected).toContain('plan-ceo-mode-routing');
+    expect(result.selected).not.toContain('retro');
   });
+
 
   test('gen-skill-docs.ts is a scoped touchfile, not global', () => {
     const result = selectTests(['scripts/gen-skill-docs.ts'], E2E_TOUCHFILES);
@@ -154,6 +344,12 @@ describe('selectTests', () => {
     // Should NOT include tests that don't depend on it
     expect(result.selected).not.toContain('retro');
     expect(result.selected).not.toContain('cso-full-audit');
+  });
+
+  test.each(['test/helpers/ceo-finding-fixture.ts'])('mode input dependency selects its periodic eval: %s', file => {
+    const result = selectTests([file], E2E_TOUCHFILES);
+    expect(result.selected).toContain('plan-ceo-mode-routing');
+    expect(result.reason).toBe('diff');
   });
 
   test('unrelated file selects nothing', () => {
@@ -182,10 +378,10 @@ describe('selectTests', () => {
 
   test('works with LLM_JUDGE_TOUCHFILES', () => {
     const result = selectTests(['qa/SKILL.md'], LLM_JUDGE_TOUCHFILES);
-    expect(result.selected).toContain('qa/SKILL.md workflow');
-    expect(result.selected).toContain('qa/SKILL.md health rubric');
-    expect(result.selected).toContain('qa/SKILL.md anti-refusal');
-    expect(result.selected.length).toBe(3);
+    expect(result.selected.sort()).toEqual([
+      'qa/SKILL.md workflow', 'qa/SKILL.md health rubric', 'qa/SKILL.md anti-refusal',
+      'qa-only/SKILL.md workflow', 'review/SKILL.md workflow', 'ship/SKILL.md workflow',
+    ].sort());
   });
 
   test('SKILL.md.tmpl root template selects root-dependent tests and routing tests', () => {
@@ -328,17 +524,8 @@ describe('TOUCHFILES completeness', () => {
       'utf-8',
     );
 
-    // Extract test names from addTest({ name: '...' }) calls
-    const nameRegex = /name:\s*['"`]([^'"`]+)['"`]/g;
-    const testNames: string[] = [];
-    let match;
-    while ((match = nameRegex.exec(llmContent)) !== null) {
-      testNames.push(match[1]);
-    }
-
-    // Deduplicate (some tests call addTest with the same name)
-    const unique = [...new Set(testNames)];
-    expect(unique.length).toBeGreaterThan(0);
+    const unique = registeredJudgeTestNames(llmContent);
+    expect(unique).toHaveLength(24);
 
     const missing = unique.filter(name => !(name in LLM_JUDGE_TOUCHFILES));
     if (missing.length > 0) {
@@ -347,6 +534,23 @@ describe('TOUCHFILES completeness', () => {
         `Add these to LLM_JUDGE_TOUCHFILES in test/helpers/touchfiles.ts`,
       );
     }
+  });
+
+  test('judge inventory ignores error names and catches an unmapped registration', () => {
+    const source = fs.readFileSync(path.join(ROOT, 'test', 'skill-llm-eval.test.ts'), 'utf8');
+    const withUnmappedCase = `${source}\n
+      Object.assign(new Error('deadline'), { name: 'WorkflowJudgeDeadline' });
+      Object.assign(new Error('retry'), { name: 'WorkflowJudgeSuperseded' });
+      testIfSelected('unmapped judge case', async () => {}, 120_000);
+    `;
+    const names = registeredJudgeTestNames(withUnmappedCase);
+    expect(names).toHaveLength(25);
+    expect(names.filter(name => !(name in LLM_JUDGE_TOUCHFILES))).toEqual(['unmapped judge case']);
+  });
+
+  test('judge inventory rejects dynamic registrations it cannot account for', () => {
+    expect(() => registeredJudgeTestNames('testIfSelected(computedName, async () => {}, 120_000);'))
+      .toThrow('must use literal case names');
   });
 });
 
@@ -463,5 +667,52 @@ describe('reverse invariant — keys must name living paid tests', () => {
     const stale = Object.entries(CONSTRUCTED_NAME_EXCEPTIONS)
       .filter(([, file]) => !fs.existsSync(path.join(ROOT, file)));
     expect(stale.map(([k]) => k), 'exception points at a deleted file — remove the entry').toEqual([]);
+  });
+});
+
+describe('derived touchfile closure', () => {
+  const { isPaidTestFile } = require('./helpers/paid-test-set') as typeof import('./helpers/paid-test-set');
+  const paid = fs.readdirSync(path.join(ROOT, 'test')).map(name => `test/${name}`).filter(isPaidTestFile).sort();
+  const source = Object.fromEntries(paid.map(file => [file, fs.readFileSync(path.join(ROOT, file), 'utf8')]));
+  const quotes = (file: string, key: string) =>
+    source[file]!.includes(`'${key}'`) || source[file]!.includes(`"${key}"`) || source[file]!.includes('`' + key + '`');
+  /** A key belongs to the paid files in its own list, else to the paid files that quote it. */
+  const owners = (key: string, deps: readonly string[]) => {
+    const listed = deps.filter(dep => paid.includes(dep));
+    return listed.length ? listed : paid.filter(file => quotes(file, key));
+  };
+  const maps = [['E2E_TOUCHFILES', E2E_TOUCHFILES], ['LLM_JUDGE_TOUCHFILES', LLM_JUDGE_TOUCHFILES]] as const;
+  /** Paid files no key selects; they run only by tier or census. */
+  const KEYLESS_PAID: Record<string, string> = {
+    'test/codex-e2e-recommendation-substance.test.ts': 'census-only Codex case; PERIODIC_CI_EXCLUDE (no codex CLI in CI)',
+    'test/skill-e2e-auq-consistency.test.ts': 'periodic tier gate only (describeE2ETier), never diff-selected',
+    'test/skill-e2e-auq-verbose-vs-carved-ab.test.ts': 'periodic tier gate only (describeE2ETier), never diff-selected',
+  };
+
+  test('no free test file is a touchfile', () => {
+    const listed = maps.flatMap(([name, map]) => Object.entries(map).flatMap(([key, deps]) =>
+      deps.filter(dep => dep.endsWith('.test.ts') && !isPaidTestFile(dep)).map(dep => `${name}['${key}']: ${dep}`)));
+    expect(listed, 'Editing a free test must not select paid evals; remove these entries').toEqual([]);
+  });
+
+  test('every key covers the static helper/fixture closure and literal fixture paths of its paid files', () => {
+    const boundary = new Set(GLOBAL_TOUCHFILES);
+    const failures: string[] = [];
+    for (const [name, map] of maps) for (const [key, deps] of Object.entries(map)) {
+      for (const owner of owners(key, deps)) for (const entry of paidTestClosure(ROOT, owner, boundary)) {
+        if (isCovered(entry.file, deps, GLOBAL_TOUCHFILES)) continue;
+        failures.push(`paid test ${owner} depends on ${entry.file}\n    via ${entry.chain.join(' -> ')}\n` +
+          `    add '${entry.file}' to ${name}['${key}']`);
+      }
+    }
+    expect(failures.length, failures.length ? `${failures.join('\n')}\n` +
+      'Verify with: bun run scripts/test-paid-shards.ts --tier gate --profile pr --list\n' +
+      'See CONTRIBUTING.md#paid-test-touchfiles. This rule is a lower bound: fixture paths built at runtime ' +
+      'are not visible to it, so declare them in the key by hand.' : '').toBe(0);
+  });
+
+  test('keyless paid files are exactly the declared exemptions', () => {
+    const keyed = (file: string) => maps.some(([, map]) => Object.entries(map).some(([key, deps]) => deps.includes(file) || quotes(file, key)));
+    expect(paid.filter(file => !keyed(file))).toEqual(Object.keys(KEYLESS_PAID).sort());
   });
 });

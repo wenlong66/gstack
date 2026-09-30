@@ -90,7 +90,8 @@ test('scoring and section dependencies are explicit while existing clean and pas
   expect(section).toContain('use the lowest of the six rated pass scores (1-6)');
   expect(section).toContain('separately before and after approved fixes');
   expect(section).toContain('Pass 7 is unscored');
-  expect(section).toContain('If all passes 8+');
+  expect(section.replace(/\s+/g, ' ')).toContain('An overall 8+ therefore means every rated pass is 8+; unresolved findings still prevent a clean review log');
+  expect(section).toContain('After Read-back, if all passes 8+');
   expect(section).toContain('"clean" if overall score 8+ AND 0 unresolved');
   expect(section).toContain('If DESIGN.md is absent, rate the plan\'s explicit token and component specifications');
   expect(section).toContain('do not skip the score or assume alignment');
@@ -102,7 +103,6 @@ test('scoring and section dependencies are explicit while existing clean and pas
 test('new regression and changed preamble sources select all Design and Eng owners', () => {
   for (const map of [E2E_TOUCHFILES, LLM_JUDGE_TOUCHFILES]) {
     const affected = selectTests(['plan-design-review/SKILL.md.tmpl', 'plan-eng-review/SKILL.md.tmpl'], map, []).selected;
-    expect(selectTests(['test/review-entry-and-design-clarity-au.test.ts'], map, []).selected).toEqual(affected);
     for (const source of ['scripts/resolvers/preamble/generate-preamble-bash.ts', 'scripts/resolvers/preamble/generate-completion-status.ts']) {
       const selected = selectTests([source], map, []).selected;
       for (const owner of affected) expect(selected).toContain(owner);

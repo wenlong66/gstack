@@ -171,6 +171,22 @@ Bun auto-loads `.env` — no extra config. Conductor workspaces inherit `.env` f
 
 ### Test tiers
 
+Functional QA changes need native fixture proof as well as prompt checks. Add declared
+CLI or loopback API/worker contracts in isolated temporary repositories, outside this
+checkout. Exercise success and adverse paths, durable effects, and setup failure.
+Report-only evaluations must leave mutation-capable tools available and independently
+detect forbidden writes, including an edit later restored; a clean final diff is not
+enough. Validate the observer with deliberately bad controls before a paid run.
+
+For exploratory regressions, retain the actual pre-repair failure, post-repair pass,
+original probe and adjacent happy path. Automatic caller tests must enter through
+review/ship, not tell the agent to run the component being tested. Documentation tests
+must prove the real child completed and the parent used its result before publication;
+the existing dispatch-only test is narrower evidence. Register new cases and all
+consumed section/resolver inputs in touchfiles, tiers and the PR profile so they run.
+Share sanitized reproduction commands and fixture evidence when reporting a problem,
+never credentials, private payloads or an entire unreviewed agent transcript.
+
 | Tier | Command | Cost | What it tests |
 |------|---------|------|---------------|
 | 1 — Static | `bun run test` | Free | Command validation, snapshot flags, Aside contract pins, render-wrapper option mapping, SKILL.md correctness, TODOS-format.md refs, observability unit tests |
@@ -179,10 +195,91 @@ Bun auto-loads `.env` — no extra config. Conductor workspaces inherit `.env` f
 | 2+3 | `bun run test:evals` | ~$4 combined | E2E + LLM-as-judge (runs both) |
 
 ```bash
-bun run test                 # Tier 1 only (run before every commit, ~90-100s for the full ~8,700-test suite)
+bun run test:quick           # Measured fast free subset for ordinary edits; not full acceptance
+bun run eval:bg:pr           # Changed fast live probes + selected quality judges, detached
+bun run test                 # Final full free acceptance after focused repairs and source freeze
+bun run test:ubicloud        # Same suite on an ephemeral 16-vCPU Ubicloud VM; needs UBICLOUD_API_KEY
 bun run test:e2e             # Tier 2: E2E only (needs EVALS=1, can't run inside Claude Code)
 bun run test:evals           # Tier 2 + 3 combined (~$4.35/run)
 ```
+
+The PR paid gate uses an explicit short behavioral profile. Every selected quality
+judge remains included; the manifest lists deferred behaviors separately from
+passes. Unknown source dependencies restore the full gate. A new prompt without
+registered coverage fails planning. Known broad behaviors remain visibly deferred
+when their prompts change; they do not silently gain PR-pass credit. The full
+gate and periodic censuses run fresh weekly and on manual
+dispatch of `evals-periodic.yml`; `bun run eval:bg:release` runs both locally.
+Some broad behavioral failures will therefore be found after the PR gate.
+
+CI enables verified first-attempt reuse for 16 workflow quality judges for
+24 hours within the same PR. The cookie workflow's custom input, the other 11
+quality cases and all dynamic agent cases stay fresh. Local runs stay fresh unless
+the complete scoped cache and runtime configuration is supplied. The key includes complete prompt bytes, generated inputs,
+fixtures, runner/rubric code, installed dependencies, model settings and runtime.
+The current assertions validate a reused score again. Records retain the original
+run, revision and time; reuse never renews that time. Failed, retried, partial or
+unknown-input results cannot be reused.
+`EVALS_FRESH=1` bypasses reuse; periodic and release runs always bypass it.
+
+Timing goals are under one minute for edit feedback, 3–5 minutes for typical PR
+checks, and 60–90 seconds for complete free test execution across isolated CI
+machines. They are targets, not timeout reductions or guarantees. The complete
+local suite uses available CPU affinity, up to 16 workers on Linux and six on
+macOS and Windows; use `test:quick` for the shorter edit loop. On a small dev
+box, container, or cloud sandbox, `bun run test:ubicloud` runs the complete suite
+on a fresh 16-vCPU Ubicloud VM with the CI lane's environment instead (about
+four and a half minutes end to end, including VM boot and setup). The
+historical six-worker result below and the
+[four-CPU portfolio comparison](docs/TEST_PORTFOLIO.md#measurement-contract)
+are machine-specific measurements. CI setup, build and queue time are reported
+separately. Refresh measurements with `bun run test:ubicloud --record-durations`;
+before publication, classify new regressions for quick feedback using that seed
+and the existing `QUICK_CORE` list. Do not classify unknown files as fast or use
+quick results as release acceptance. The runner retains full logs in
+`.context/free-test-logs/` and explains the next repair step on failure; see
+[free-runner recovery](docs/TESTING_INTERNALS.md) for details. For full acceptance,
+the required free CI lane packs the complete inventory across isolated runners,
+then checks every shard's receipt before reporting success. Local worker counts
+remain bounded to avoid browser/process contention.
+
+Historical measurements from 2026-09-21:
+
+| Run | Coverage | Elapsed |
+|---|---|---|
+| Local edit feedback | 861 of 993 free test files | 38 seconds |
+| Local complete free suite | All 993 files, six workers | 4m 35s |
+| Complete Linux CI | All 993 files, 20 isolated runners | 1m 40s across test steps; 3m 7s including setup and aggregation |
+
+After the 2026-09-29 test audit ([evidence](docs/test-audit-2026-09.md)):
+
+| Run | Coverage | Elapsed |
+|---|---|---|
+| Complete free suite, `bun run test:ubicloud` (standard-16) | All 857 files, 20,302 passing tests | 136 seconds on the VM; 1,738 seconds of recorded serial test time |
+
+The [Linux CI run](https://github.com/garrytan/gstack/actions/runs/35642667809)
+on `25030d68` included one recorded successful retry. Its slowest test step was 77 seconds;
+staggered starts made the complete test span longer. Typical PR paid-gate timing
+still needs measurement on a small change. Explicitly exempt free-only runner
+changes do not select paid work; mapped dependencies take precedence, and unknown
+dependencies retain the broad fallback. See the
+[coverage boundaries](docs/TEST_PORTFOLIO.md#repeated-work-removed).
+
+When a paid eval fails, fix the product or the harness and add the captured case as one row in
+the detector's owner test (the detector → owner table is in
+[TEST_PORTFOLIO.md](docs/TEST_PORTFOLIO.md#detector-owner-tests)); never add a new per-incident file.
+A row is one `describe` block or table entry next to the others, for example a new
+`describe('eng-cache-writes-at', …)` in `test/eng-first-review.test.ts` that loads its fixture and asserts
+`engFirstReviewAUQ` on the captured call. Run `bun test <owner-test>`, then
+`bun test test/test-of-test-ratchet.test.ts`: the ratchet fails on any new test file that imports only
+`test/` code and names the owner test to use instead.
+
+Follow [Validation discipline in AGENTS.md](AGENTS.md#validation-discipline):
+reproduce known failures with focused checks, verify adjacent source and
+generation contracts, then run the affected and remaining required selected
+evaluations. Finish review fixes and release preparation before running the
+full free suite once on the frozen code. During repairs, focused checks replace
+a full-suite run before every commit.
 
 ### Tier 1: Static validation (free)
 
@@ -198,7 +295,8 @@ flakes; the required CI free lane turns it on and uploads every flaky pass
 in a JSONL ledger artifact that `bun run eval:flake-rank` folds in).
 Working in a cloud sandbox? Run `scripts/sandbox-doctor.sh` once per boot to
 make the suite run green (details in
-[docs/TESTING_INTERNALS.md](docs/TESTING_INTERNALS.md)).
+[docs/TESTING_INTERNALS.md](docs/TESTING_INTERNALS.md)), or skip the sandbox's
+limits entirely with `bun run test:ubicloud`.
 Don't type bare `bun test` for the suite: it walks the whole repo, loads paid
 eval files, and misses the strict classifier. No API keys needed.
 
@@ -210,7 +308,7 @@ eval files, and misses the strict classifier. No API keys needed.
 - **Generator tests** (`test/gen-skill-docs.test.ts`) — Tests the template system: verifies placeholders resolve correctly, output includes value hints for flags (e.g. `-d <N>` not just `-d`), enriched descriptions for key commands (e.g. `is` lists valid states, `press` lists key examples).
 - **Design detector, catalog, and DESIGN.md** (`test/gstack-design-detect.test.ts`, `test/design-detect-contract.test.ts`, `test/design-catalog.test.ts`, `test/design-checklist-sync.test.ts`, `test/design-md.test.ts`, `test/frontend-scope.test.ts`, `test/impeccable-fixtures.test.ts`) — Drive `bin/gstack-design-detect.ts` through the fake engine in `test/fixtures/fake-impeccable.ts` (probe order, the never-execute-a-repository-file rule, the `--changed` target allow-list, `design_detector: off`, analytics lines, output sanitizing), pin the catalog invariants and the generated `review/design-checklist.md`, round-trip the open DESIGN.md reader/writer, and check the real engine captures (`test/fixtures/impeccable-*.json`, engine 0.1.3) against the contract. `test/dom-dump-hygiene.test.ts` runs `lib/dom-dump.js` in a real Chromium page through the built browse binary; it self-skips without the binary and is opt-in outside CI (`GSTACK_DOM_DUMP_HYGIENE=1`).
 - **Tier-alignment invariant** (`test/e2e-tier-alignment.test.ts`) — For every self-gated `test/skill-e2e-*.test.ts` named in a touchfiles dep list, the file's `EVALS_TIER` self-gate must match its declared tier in `E2E_TIERS`. Kills the "inert demotion" class where a test is re-tiered in `touchfiles.ts` but the file still gates on the old tier and keeps running in the wrong lane. Unmapped or mixed-tier files are reported, never silently skipped.
-- **Catalog budget** (`test/catalog-budget.test.ts`) — Caps the aggregate discovery surface: the sum of every skill's frontmatter `name` + `description` (what every host loads at discovery, every session) must stay under 1,150 token-equivalents, with a 260-byte per-skill cap. Counting goes through the shared census in `test/helpers/skill-census.ts` (physical files vs authored skills vs registry entries — three deliberately different counts). Adding a skill? The failure message carries the re-measure + ratchet protocol.
+- **Catalog budget** (`test/catalog-budget.test.ts`) — Caps the aggregate discovery surface: the sum of every skill's frontmatter `name` + `description` (what every host loads at discovery, every session) must stay under 1,171 token-equivalents, with a 260-byte per-skill cap. Counting goes through the shared census in `test/helpers/skill-census.ts` (physical files vs authored skills vs registry entries — three deliberately different counts). Adding a skill? The failure message carries the re-measure + ratchet protocol.
 - **Context-budget ratchet** (`test/context-budget-ratchet.test.ts`) — CI ceilings on the two token ledgers the catalog budget doesn't cover: the always-on full-frontmatter aggregate and each skill's per-invocation eager tokens (SKILL.md + forced-read references), graded against `test/fixtures/context-budget.json` via `lib/context-bill.ts`. New skills fail until they have a ceiling; ceilings for removed skills must be pruned. Legitimate growth or a landed reduction: re-run `bun test/helpers/capture-context-budget.ts` and commit the refreshed fixture in the same commit, so the change is a visible decision in the diff.
 - **Dependency security regressions** (`test/dependency-security.test.ts`) — Run `bun test test/dependency-security.test.ts` to check the resolved `sharp` and `adm-zip` version floors, load Sharp, verify ordinary ZIP extraction, and reject extraction through destination-file and destination-directory symlinks. The symlink cases skip Windows. These checks complement the OSV scan; they do not change its existing exceptions.
 
@@ -220,7 +318,7 @@ Spawns `claude -p` as a subprocess with `--output-format stream-json --verbose`,
 
 ```bash
 # Must run from a plain terminal — can't nest inside Claude Code or Conductor
-EVALS=1 bun test test/skill-e2e-*.test.ts
+EVALS_RUN_ID="local-$(bun -e 'console.log(crypto.randomUUID())')" EVALS=1 bun test test/skill-e2e-*.test.ts
 ```
 
 - Gated by `EVALS=1` env var (prevents accidental expensive runs)
@@ -230,13 +328,23 @@ EVALS=1 bun test test/skill-e2e-*.test.ts
 - Saves full NDJSON transcripts and failure JSON for debugging
 - Tests live in `test/skill-e2e-*.test.ts` (split by category), runner logic in `test/helpers/session-runner.ts`
 
+Supply a fresh `EVALS_RUN_ID` for each invocation, including detached runs below.
+Functional QA and documentation cases refuse acceptance without it. CI supplies
+its own run/attempt/job/slice identity; see [Testing internals](docs/TESTING_INTERNALS.md)
+for the retained native-capture artifacts.
+
 **Hermetic by default.** Every E2E runner (claude -p, the real-PTY plan-mode
 runner, the Agent SDK runner, plus the codex and gemini runners) spawns its child
 through `test/helpers/hermetic-env.ts`: an allowlist-scrubbed environment, a fresh
 seeded `CLAUDE_CONFIG_DIR`, a temp `GSTACK_HOME`, and `--strict-mcp-config`. Your
 operator `~/.claude` config, MCP servers (gbrain, Conductor), skills, `~/.gstack`
-decision logs, and `CONDUCTOR_*` env never leak into the child, so local eval
-signal matches CI instead of disagreeing for reasons unrelated to the code under
+decision logs, and `CONDUCTOR_*` env never leak into the child. The `GITHUB_`
+and `EVALS_` prefix rules preserve CI metadata but reject credential-shaped
+names such as `GITHUB_TOKEN`, `GITHUB_PERSONAL_ACCESS_TOKEN`, and
+`GITHUB_APP_PRIVATE_KEY`. Named provider auth, runner `extraAllow` entries, and
+per-test overrides are deliberate exceptions; a name-based rule cannot identify
+a secret assigned to an arbitrary metadata name. This keeps local eval signal
+aligned with CI instead of disagreeing for reasons unrelated to the code under
 test. The hermetic `CLAUDE_CONFIG_DIR` seeds no skills by default; a PTY test
 that types a `/skill` slash command passes `seedSkills: true` to the PTY runner,
 which swaps in `hermeticSkillsConfigDir()` — a seeded skill registry that
@@ -326,9 +434,19 @@ Each dimension is scored 1-5. Threshold: every dimension must score **≥ 4**. T
 - Tests live in `test/skill-llm-eval.test.ts`
 - Calls the Anthropic API directly (not `claude -p`), so it works from anywhere including inside Claude Code
 
+### Paid-test touchfiles
+
+`test/helpers/touchfiles-data.ts` maps each paid case to the files whose edits select it. Free
+`*.test.ts` files are never listed: editing a free test does not run paid evals. `test/touchfiles.test.ts`
+derives each paid file's static `test/helpers` / `test/fixtures` import closure, plus the fixture and helper
+paths it names in string literals, and fails when that closure is not covered by the case's key. When it
+fails, add the named path to the named key and check selection with
+`bun run scripts/test-paid-shards.ts --tier gate --profile pr --list`. The rule is a lower bound: a fixture
+path the test builds at runtime is not visible to it, so add such paths to the key by hand.
+
 ### CI
 
-A GitHub Action (`.github/workflows/skill-docs.yml`) runs `bun run gen:skill-docs --dry-run` on every push and PR. If the generated SKILL.md files differ from what's committed, CI fails. This catches stale docs before they merge.
+A GitHub Action (`.github/workflows/skill-docs.yml`) generates all hosts on pushes to main and on PRs, then rejects tracked differences and nonignored untracked output. Generation errors also fail the job. Optional ignored host caches are not compared against Git.
 
 Supply-chain gates run alongside it:
 
@@ -358,6 +476,13 @@ bun run skill:check
 # Or use watch mode — auto-regenerates on save
 bun run dev:skill
 ```
+
+`skill:check` renders all hosts into temporary storage using canonical content
+paths and host defaults, validates the complete generated content, and compares
+expected tracked artifacts against the checkout. Missing, changed, or nonignored
+untracked output fails. Local ignored host caches, including symlinked caches,
+are left untouched; the checker works without them. A generation failure cannot
+produce a successful check of partial output.
 
 For template authoring best practices (natural language over bash-isms, dynamic branch detection, `{{BASE_BRANCH_DETECT}}` usage), see CLAUDE.md's "Writing SKILL templates" section.
 

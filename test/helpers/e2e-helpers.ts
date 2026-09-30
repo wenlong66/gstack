@@ -6,7 +6,7 @@
  */
 
 import '../../lib/conductor-env-shim';
-import { describe, test, beforeAll, afterAll, expect } from 'bun:test';
+import { describe, test, afterAll, expect } from 'bun:test';
 import type { SkillTestResult } from './session-runner';
 import { EvalCollector, judgePassed } from './eval-store';
 import type { EvalTestEntry } from './eval-store';
@@ -14,7 +14,6 @@ import { judgeRecommendation, type RecommendationScore } from './llm-judge';
 import { selectTests, detectBaseBranch, getChangedFiles, E2E_TOUCHFILES, E2E_TIERS, GLOBAL_TOUCHFILES } from './touchfiles';
 import { WorktreeManager } from '../../lib/worktree';
 import type { HarvestResult } from '../../lib/worktree';
-import { spawnSync } from 'child_process';
 import { preflightAnthropicApi } from './anthropic-preflight';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -94,15 +93,18 @@ export function resolveModuleSelection(
   compute: () => string[] | null,
   stderrWrite: (text: string) => void = (text) => process.stderr.write(text),
 ): string[] | null {
+  const strictProfile = process.env.EVALS_PROFILE === 'pr';
   if (raw) {
     try {
       const { selected, reason } = parseEvalsSelectionJson(raw);
       stderrWrite(`\nE2E selection (parent-propagated: ${reason}): ${selected === null ? 'all' : selected.length} tests\n`);
       return selected;
     } catch (err) {
+      if (strictProfile) throw new Error(`PR profile requires a valid persisted selection: ${err instanceof Error ? err.message : String(err)}`);
       stderrWrite(`WARNING: malformed EVALS_SELECTION_JSON (${err instanceof Error ? err.message : String(err)}) — falling back to local selection\n`);
     }
   }
+  if (strictProfile) throw new Error('PR profile requires persisted case selection from scripts/test-paid-shards.ts');
   return compute();
 }
 
@@ -281,10 +283,14 @@ export async function assertRecommendationQuality(opts: {
   evalTitle: string;
   result: SkillTestResult;
   passed: boolean;
+  signal?: AbortSignal;
+  /** Let a bounded attempt defer its one terminal record until all assertions settle. */
+  record?: (extra: Pick<EvalTestEntry, 'judge_scores' | 'judge_reasoning'>) => void;
 }): Promise<RecommendationScore> {
-  const recScore = await judgeRecommendation(opts.captured);
-  recordE2E(opts.evalCollector, opts.evalId, opts.evalTitle, opts.result, {
-    passed: opts.passed,
+  opts.signal?.throwIfAborted();
+  const recScore = await judgeRecommendation(opts.captured, opts.signal);
+  opts.signal?.throwIfAborted();
+  const metadata = {
     judge_scores: {
       rec_present: recScore.present ? 1 : 0,
       rec_commits: recScore.commits ? 1 : 0,
@@ -292,7 +298,9 @@ export async function assertRecommendationQuality(opts: {
       rec_substance: recScore.reason_substance,
     },
     judge_reasoning: `${recScore.reasoning} | reason: "${recScore.reason_text}"`,
-  });
+  };
+  if (opts.record) opts.record(metadata);
+  else recordE2E(opts.evalCollector, opts.evalId, opts.evalTitle, opts.result, { passed: opts.passed, ...metadata });
   expect(recScore.present, recScore.reasoning).toBe(true);
   expect(recScore.commits, recScore.reasoning).toBe(true);
   expect(recScore.has_because, recScore.reasoning).toBe(true);
@@ -330,7 +338,6 @@ if (evalsEnabled) {
     '.telemetry-prompted',
     '.proactive-prompted',
     '.first-loop-tip-shown',
-    '.feature-prompted-continuous-checkpoint',
     '.feature-prompted-model-overlay',
   ]) {
     const p = path.join(gstackDir, f);
@@ -390,24 +397,6 @@ export function harvestAndCleanup(testName: string): HarvestResult | null {
   }
   mgr.cleanup(testName);
   return result;
-}
-
-/**
- * Convenience: describe block with automatic worktree isolation + harvest.
- * Any test file can use this to get real repo context instead of a tmpdir.
- * Note: tests with planted-bug fixtures should NOT use this — they need their fixture repos.
- */
-export function describeWithWorktree(
-  name: string,
-  testNames: string[],
-  fn: (getWorktreePath: () => string) => void,
-) {
-  describeIfSelected(name, testNames, () => {
-    let worktreePath: string;
-    beforeAll(() => { worktreePath = createTestWorktree(name); });
-    afterAll(() => { harvestAndCleanup(name); });
-    fn(() => worktreePath);
-  });
 }
 
 export { judgePassed } from './eval-store';

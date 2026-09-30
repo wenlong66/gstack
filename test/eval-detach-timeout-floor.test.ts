@@ -26,7 +26,7 @@ import {
   resolvePaidShardBudget,
   type PaidTier,
 } from '../scripts/test-paid-shards';
-import { AUTOPLAN_CHAIN_BUDGET } from './helpers/eval-budgets';
+import { FINDING_RETRY_BUDGETS } from './helpers/eval-budgets';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 // 5% margin over the theoretical bound: detach setup, lock wait, aggregation.
@@ -73,12 +73,28 @@ describe('eval:bg detach timeouts cover the sharded runner worst case', () => {
       }
     });
   }
+
+  test('eval:bg:pr covers a full gate fallback with its declared two-worker default', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    const jobs = Number(pkg.scripts['test:pr'].match(/EVALS_JOBS=\$\{EVALS_JOBS:-(\d+)\}/)?.[1]);
+    expect(jobs).toBe(2);
+    const files = selectPaidTestFiles(collectPaidTestFiles(), 'gate').selected;
+    const floor = Math.ceil(worstCaseSeconds(files, jobs) * MARGIN);
+    expect(detachTimeoutSeconds('eval:bg:pr')).toBeGreaterThanOrEqual(floor);
+  });
+
+  test('eval:bg:release covers both complete tiers and their existing margins', () => {
+    const files = collectPaidTestFiles();
+    const floor = (['gate', 'periodic'] as const).reduce((sum, tier) =>
+      sum + Math.ceil(worstCaseSeconds(selectPaidTestFiles(files, tier).selected) * MARGIN), 0);
+    expect(detachTimeoutSeconds('eval:bg:release')).toBeGreaterThanOrEqual(floor);
+  });
 });
 
 // One long job and one ordinary job can run side by side; the long job still
 // needs its whole wall, regardless of the number of ordinary workers.
 test('a heterogeneous pair rejects the old uniform-wall floor', () => {
-  const pair = [AUTOPLAN_CHAIN_BUDGET.file, 'test/skill-e2e-other.test.ts'];
+  const pair = [FINDING_RETRY_BUDGETS[0]!.file, 'test/skill-e2e-other.test.ts'];
   const actualLongest = Math.max(...pair.map(file => resolvePaidShardBudget([file]).timeoutMs)) / 1000;
   expect(worstCaseSeconds(pair, 2)).toBe(actualLongest);
   expect(worstCaseSeconds(pair, 2)).toBeGreaterThan(DEFAULT_SHARD_TIMEOUT_MS / 1000);

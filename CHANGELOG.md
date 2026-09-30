@@ -1,5 +1,397 @@
 # Changelog
 
+## [1.91.9.0] - 2026-09-29
+
+Every gstack workflow that proposes, writes, reviews or ships tests now applies one test value bar: a test earns its place by protecting behavior a real regression would break, and test count is not a goal. `/ship`'s coverage gate counts only tests that clear that bar, and the new `/test-audit` sweeps existing tests for ones that cost more than they protect.
+
+`/ship`'s coverage number can drop for unchanged code, because a path covered only by a smoke test (★) no longer counts. The gate shows both numbers, for example:
+
+```
+Before: Coverage gate: 81%
+After:  Coverage: 58% value-weighted (81% including 4 weakly covered paths)
+```
+
+No action required; the gate still only asks.
+
+### Added
+
+- `/test-audit [path ...] [--since <ref>] [--max-candidates N]` finds low-value, implementation-coupled and duplicate tests and the test-only exports they keep alive. A mechanical pre-filter runs before any model reading, every candidate carries a complete retirement card (what it detects, non-test callers with the search command, stronger remaining proof, history, what retiring it unlocks, validation), and SKILL.md goldens and other contract tests are retained. The report and a JSON sidecar land in `~/.gstack/projects/<slug>/`. Nothing is edited unless you approve a batch; spawned and headless sessions stay report-only.
+- `docs/test-value-bar.md` explains the authoring gate, value and retirement cards, weak paths, the value-weighted (X) and any-test (Y) coverage numbers, base control, the overrides and every degraded-mode message.
+- Optional CLAUDE.md `## Test Coverage` keys: `Generation cap:` (default 5), `Base control:` (`auto` or `off`), `Base control budget:` (seconds, default 90) and `Star rating:` (`auto` or `off`). A `gstack:test-value keep reason="..."` comment makes `/review` and `/test-audit` skip a deliberate test and report the reason.
+
+### Changed
+
+- `/ship` Step 7 extends existing tests before writing new ones and writes at most 5 tests per generation pass (was 20). Each generated test carries a value card header. The parent rejects and removes tests with an incomplete card, a duplicate `protects` or a seam with no non-test caller, and a separate read-only pass rates the tests written in the run. The gate reads the value-weighted `coverage_pct_value`, falls back to `coverage_pct` with an upgrade note when an older skill omits it, and never substitutes 0. In spawned sessions it generates only for true gaps and lists weak paths as proposals.
+- `/ship` regression tests must fail at HEAD before the repair and pass at the base branch in a temporary worktree (Node/Bun), within 90 seconds per test and 3 minutes per run. Other ecosystems record "base control unavailable" with a four-command manual check.
+- The PR body adds `Test value: K tests written, R rejected by the authoring gate, E existing tests extended, W paths weakly covered`, and Step 20 metrics record `coverage_schema: 2`, `coverage_pct_value`, the weak, extended and rejected counts, and regression-proof counts.
+- `/plan-eng-review` and `/plan-ceo-review` state one rule: every behavior tested, no test without a regression it would catch. Test plans carry a value card per critical path and edge case, plus a `## Tests to Retire` section that `/test-audit` reads as seeds.
+- `/review`'s testing specialist reports source-grep tests, test-only exports and other low-value tests in the diff as INFORMATIONAL findings with caller-search evidence, never as auto-deletes, and flags regression tests without red proof. A gap closed only by a low-value test stays a coverage gap at its existing severity.
+- `/qa` and `/qa-only` apply the bar's last two questions before writing or proposing a regression test and record its value card.
+
+### For contributors
+
+- `scripts/resolvers/test-value.ts` owns the shared constants, the `{{TEST_VALUE_BAR:<mode>}}` and `{{TEST_VALUE_MESSAGE:<key>}}` placeholders and per-mode byte ceilings (measured renders plus 15%: plan 1,897, ship 2,742, qa 1,036, audit 3,712 bytes). Adapted from openclaw/openclaw@a214e76 `.agents/skills/test-audit`. The unreachable `review` branch of the coverage audit is deleted.
+- `test/test-value-bar.test.ts` checks each mode's contract text and ceiling, the ship gate's decision rows, the rejected-file removal script in a Git fixture, the static review specialist's sync with the constants, docs anchors and skill registration. Three gate evals in `test/skill-e2e-test-value.test.ts` cover a weak path in `weak_gaps`, low-value review findings with a retained golden, and a report-only `/test-audit`.
+- Budgets moved for the new skill and the embedded bar, each at its measured value with the derivation recorded: catalog 1,171 → 1,194 token-equivalents (`/test-audit` adds 92 bytes), always-on context 6,465 → 6,873 tokens, a new `test-audit` eager ceiling of 10,439 tokens, and carve-guard union ratios for ship (1.322 → 1.397; the lazy Step 7 section grows about 13.6KB), plan-eng-review (1.151 → 1.169) and qa (1.08 → 1.095). The paid census pins count the new gate file.
+- The context-budget and ship golden fixtures are audited free-only PR inputs, so editing them no longer restores every paid gate case.
+- `test/pr-shared-input-selection.test.ts` no longer depends on whether the local `package.json` differs from its merge-base.
+- The catalog estimate in `test/skill-size-budget.test.ts` lists skills from `HEAD`, the same tree it reads, so a staged but uncommitted skill no longer breaks it.
+
+## [1.91.8.0] - 2026-09-29
+
+The test suite is smaller and every remaining test maps to a product contract: 227 fewer test files, about 90,000 fewer lines of tests, helpers and fixtures, and the weekly paid lane drops the five evals that were red eight runs straight. Free tests that only replayed one captured failure are folded into their detector's owner test, and paid eval selection is derived from each eval's own imports instead of hand-copied lists.
+
+| Measure | Before (v1.91.6.0) | After |
+| --- | ---: | ---: |
+| Tracked test files | 1,184 | 957 |
+| Test-file lines (all `*.test.ts`) | 279,640 | 244,504 |
+| `test/` TypeScript lines (tests + helpers) | 274,208 | 227,713 |
+| `test/helpers` lines | 51,390 | 39,427 |
+| `test/fixtures` bytes | 16.3 MB | 9.7 MB |
+| Free suite files / passing tests (Ubicloud standard-16) | 1,065 / 27,331 | 857 / 20,302 |
+| Free suite serial seconds (recorded durations, same machine class) | 1,888 | 1,738 |
+| Paid files / gate-lane files / periodic files | 119 / 58 / 100 | 100 / 42 / 69 |
+| Weekly gate-census files | 58 | 41 (LLM judges run in the periodic and PR lanes) |
+| Weekly periodic shard-minutes spent on files this release removes (09-21 run) | 235 of 462 | 0 |
+
+The table compares v1.91.6.0 with this branch before it merged v1.91.7.0, which adds its own functional-QA and documentation tests. With both, the free suite runs 914 files (2,066 recorded serial seconds), the paid census has 104 files (46 gate, 70 periodic), and the weekly gate census runs 45 files in seven slices. v1.91.7.0's new paid cases follow the same derived-touchfile rule, and its new helper-only tests are listed in the ratchet baseline.
+
+### Removed
+- The never-green finding-count cluster: `skill-e2e-autoplan-chain` and `skill-e2e-plan-{ceo,eng,design,devex}-finding-count`, whose weekly failures were harness and budget failures, never skill behavior (triage in `docs/test-audit-2026-09.md`). No paid eval now proves a live model completes the full `/autoplan` chain or asks one question per finding; both gaps have TODOS entries with re-entry tests. The dedicated eighth periodic slice and `AUTOPLAN_CHAIN_BUDGET` go with them.
+- Paid files that asserted nothing or could not pass: `skill-llm-eval-spec`, `skill-e2e-spec-execute`, `gemini-e2e` (no Gemini CLI in CI), `skill-e2e-ship-idempotency`, `skill-e2e-conductor-prose`, `codex-e2e-plan-format`, `skill-e2e-brain-privacy-gate`, `skill-e2e-opus-47` (its negative routing controls moved into `skill-routing-e2e`) and two duplicate overlay wrappers; `test:gemini` scripts removed.
+- Free tests of dead eval code, product tests that exercised copies of the product, and test-infrastructure dead code.
+
+### Changed
+- Tests that faked the product now drive it: the design `serve()` server, terminal-agent `/internal/grant` and `/internal/revoke` bearer auth, `/health` liveness, and brain-sync consent before egress.
+- Per-incident replay files are folded verbatim into twelve detector owner tests (listed in `docs/TEST_PORTFOLIO.md`), keeping every captured case.
+- Paid touchfiles are derived: `test/touchfiles.test.ts` checks that each case's key covers its eval's static helper/fixture imports and the fixture paths it names, and free `*.test.ts` files are no longer touchfiles, so editing a free test no longer selects paid evals.
+- The paid planner skips a file for a tier lane when every E2E id it registers belongs to the other tier (the hollow shards), and the weekly gate census skips the LLM judges.
+- Seven paid evals that pinned `claude-opus-4-7` or `claude-sonnet-4-6` now capture with the default model from `resolveEvalModel`; all passed on it. Four more (`skill-e2e-design`, `-office-hours-phase4`, `-plan-prosons`, `-plan`) keep `claude-opus-4-7` because six of their cases failed on the default model; TODOS tracks re-pinning them.
+- memory-pipeline, ios-qa, ios-qa-swift-build and plan-tune-cathedral make no model calls and now run in the free suite; CI-unrunnable Codex, Aside, outside-voice and iOS-device files are excluded from the weekly lane with a tracked re-entry condition.
+- The plan-count history PTY test waits for its startup marker instead of a fixed 8-second sleep.
+
+### Fixed
+- The `/plan-design-review` UI-scope gate eval recognizes a Design finding by the review's own issue-numbered options (`1A`, `1B`, …) as well as by UI vocabulary, so a real finding about hierarchy, navigation, state tables or confirmation patterns no longer goes uncounted until the 600-second cap. It timed out on v1.91.7.0 in one of two local runs and on this branch's CI; both fixed runs finished in about 420 seconds.
+- `bun run test:ubicloud` no longer reports `pull failed` when a run leaves no flake ledger in `/tmp`: a retrieval glob that matches nothing is skipped with a note, and the retained shard logs still land in `.context/ubicloud/<timestamp>/free-test-logs/`.
+
+### For contributors
+- When a paid eval fails, fix the product or harness and add the captured case as one row in the detector's owner test; `test/test-of-test-ratchet.test.ts` fails on any new test file that imports only `test/` code and names the owner test to extend. `CONTRIBUTING.md` "Test tiers" has an example.
+- Deleted `test/helpers` modules and where their live cases went:
+  - `autoplan-setup-question`, `ceo-approach-pick`, `ceo-completion-handoff`, `ceo-payment-findings`, `design-artifact-question`, `design-count-fixture`, `design-count-outside`, `design-count-review`, `devex-count-fixture`, `devex-seed-coverage`, `eng-count-question-policy`: consumed only by the retired finding-count evals; runner tests that used them as caller policies now use inline policies, and the omitted-`multiSelect` default moved to `test/plan-review-decisions.test.ts`.
+  - `autoplan-phase-order`, `pty-current-screen`: never wired; the settings-overwrite card assertion moved to `test/helpers/claude-pty-runner.unit.test.ts`.
+  - `ceo-paired-fixture`, `design-ui-scope`, `plan-skill-completion`, `required-reads`, `transcript-section-logger`, `eng-finding-fixture`, `eng-completion-handoff`, `eng-retained-corpus`, `captured-paths`, `gemini-session-runner`: no live cases.
+- `test/helpers/resolve-repo-path.ts` resolves specifiers and path literals for both the ratchet and the touchfile closure check. The full evidence (inventories, selection proof, security mapping, retained false positives) is in `docs/test-audit-2026-09.md`.
+
+## [1.91.7.0] - 2026-09-28
+QA can test APIs, CLIs, jobs, workers and webhooks with the project's own tools,
+without starting a browser. Review and ship now run bounded exploratory checks,
+and every ship audits relevant documentation before final verification and publication.
+
+### Added
+
+- Functional QA checks native outputs and durable effects, including invalid inputs, authorization, cancellation, retries, duplicate delivery, concurrency and recovery. Reports distinguish failures, blocked probes and untested contracts; browser and functional results stay separate.
+- Exploratory QA turns observations into targeted probes and proposed regression tests. Written evidence checkpoints connect each observed result to the next probe and are linked from the final report. Authorized repairs require a reproduced defect, a regression that fails before the repair, and successful regression, original-probe and adjacent-path checks when the native test infrastructure supports them.
+
+### Changed
+
+- `/qa` and `/qa-only` load instructions for the selected surface on each supported host. Functional and report-only runs never bootstrap a framework or inherit browser setup permission; `/qa-only` preserves product code, tests, configuration and Git state.
+- `/review` and `/ship` run bounded exploration even on small non-browser diffs without a plan or server. Required checks remain required when blocked or unfinished, and proposed tests retain the parent's approval gates.
+- Review collects checklist, specialist, QA and adversarial findings before one parent-owned fix phase. Re-review keeps the same three-cycle limit, reruns affected probes and records incomplete coverage honestly.
+- Every ship consumes a completed documentation audit before final checks and publication, including uncommitted changes and existing-PR or repeat runs. Failed, stale or unsettled child results cannot silently become a clean audit; the parent retains release metadata and Git ownership.
+
+### Fixed
+
+- Report-only QA completes its scope and method Reads before setup, and preserves exact public fixture paths in evidence instead of inventing redacted paths. Actual secrets and private payloads remain protected.
+- Ship's workflow quality judge uses a 64k streamed, structured response within its existing deadline; other judges retain their 8k allowance. Cache identity includes the actual cap, transport and response contract, and incomplete or malformed scores remain failures.
+- Repeated QA runs preserve prior reports, baselines and exploration notes. Browser techniques follow the same checkpointed probe order as functional QA, and mixed reports keep each surface's evidence and scores separate.
+- Ship's two-pass test-generation allowance includes the initial attempt, failures and zero-test results. Duplicate design findings share one action while retaining both reviewers' evidence, statistics and the stricter approval requirement.
+- Ship keeps repair and late-change instructions in the steps that own them. Nested repairs preserve their return destination, and release preparation requires matching review records before version or documentation writes.
+- Reusing skipped shared-code advice now relies on executable checks of the captured branch and eligible raw source evidence. Unsupported Git states, transformed paths and records without trusted coverage provenance cannot certify a previous decision.
+- Paid-test `--list` also stays read-only with a saved plan and selected slice: it validates and lists the selected work without API preflight, test launches or result files.
+- Functional-QA test fixtures enforce their declared foreground command boundary before execution, and shared native-event decoding rejects malformed or incomplete evidence while preserving caller-specific handoff rules.
+- Native plan fixtures accept byte-exact seeds inside Claude's paste envelope without accepting fused or changed content. QA fixture completion avoids duplicating its checkpoint ledger, and caller fixtures distinguish absolute deadlines from start times.
+- Free tests retain private full logs, fail when evidence cannot be saved, and give an actionable recovery step. Linux and Windows CI collect the retained logs. Refreshed timings make new fast regressions reachable through the existing quick lane without removing complete-suite coverage.
+- The Ubicloud wrapper retrieves retained free-test logs and any retry ledger before destroying its VM.
+
+## [1.91.6.0] - 2026-09-28
+
+PR eval slices are balanced by how long each eval actually takes, so the slowest slice no longer carries most of the run.
+
+### Changed
+- The paid eval planner re-packs slices using recorded per-file wall times from real CI runs (`scripts/paid-test-durations.json`). It starts from the existing supervised allocation and only moves or swaps a file out of the heaviest slice when no slice's worst-case wall, for 1–4 workers, rises above that allocation's maximum, so CI timeout coverage never gets weaker. Estimated from the recorded times with two workers per slice, the heaviest slice for a typical PR run drops from about 15 minutes to 12 (the length of the single longest eval), and for the full gate census from about 17 minutes to 13.
+- `bun run scripts/test-paid-shards.ts --report <dir> --write-durations` merges a report's executed single-file shard times into the seed. Skipped-only and sub-second shards are ignored.
+
+## [1.91.5.0] - 2026-09-28
+
+The free suite now finishes in about half the time on a 16-core Linux machine, `bun run test:ubicloud` runs it on a fresh 16-vCPU Ubicloud VM from any dev box, container, or cloud sandbox, and re-pushing a PR no longer waits behind the previous commit's eval run.
+
+### Added
+- `bun run test:ubicloud [test:free args]` runs the complete free suite on an ephemeral Ubicloud VM (`UBICLOUD_API_KEY` required; `UBI_SIZE` and `UBI_LOCATION` choose the machine). The VM gets the required CI lane's environment and strictness settings, uncommitted edits are included, shard logs are copied to `.context/ubicloud/`, and the VM is always destroyed afterwards. A full run takes about four and a half minutes end to end, compared with seven and a half minutes of suite time alone on a 4-vCPU machine.
+- `bun run test:ubicloud --record-durations` refreshes `scripts/free-test-durations.json` in that same environment and copies it back.
+- `scripts/ubicloud/ubi-runner.sh` runs any command on a Ubicloud VM (`run`, or `up` / `ssh` / `sync` / `pull` / `down`). It needs only bash, curl, python3, ssh, and tar locally, and it removes its own stale VMs after 12 hours.
+
+### Changed
+- On Linux, `bun run test` now starts one shard per available CPU, up to 16; macOS and Windows keep the limit of six. On a 16-vCPU VM, 16 shards finished the suite in 137 seconds and six shards took 327 seconds.
+- The duration seed is re-recorded with browser, display, and CSO tests actually running, and the slowest test file is split into four files. On a 16-vCPU run, all 16 shards now finish within about 15 seconds of each other, where one shard used to take twice as long as the rest. The 20 CI shards are packed with the same seed.
+- Full-suite and CI planning runs name any test file missing from the duration seed, so a slow new file cannot quietly become the long pole.
+- The Windows CI lane gets the same single serial retry for attributed failures as the required Linux lane, and uploads its flaky passes as a `flake-ledger-windows` artifact. Its process-supervision timing tests pass when run alone but can stall under the lane's two-shard load.
+- A new push to a pull request now cancels the previous commit's paid eval run. The eval slice, report, and comment jobs run unless the workflow is cancelled (`!cancelled()`) instead of unconditionally (`always()`), so they still run when the image build is skipped or a slice fails, but a superseded run no longer finishes (and bills) its slices while the new commit's run waits behind it. A workflow test fails if any eval job goes back to a job-level `always()`.
+- LLM-judge skill quality evals require a clarity score of 3 instead of 4; completeness and actionability bars are unchanged. The cookie setup judge keeps its manually approved thresholds.
+- Two timing-sensitive tests allow for a heavily loaded machine: the terminal-agent startup race waits up to 8 seconds for a cold agent start, and the invalid Retry-After cases accept timer delays below the next 4-second backoff step.
+
+## [1.91.4.0] - 2026-09-28
+
+Windows users can copy signed-in cookies from Opera and Opera GX into gstack's browser. On Windows, where Chrome, Edge and Brave increasingly store App-Bound Encryption cookies that gstack cannot decrypt, Opera and Opera GX still use DPAPI-protected cookies, so they may be the browsers where import keeps working.
+
+### Added
+- `cookie-import-browser opera` and `opera-gx` (also `operagx` and "Opera GX") on Windows, read from `%APPDATA%\Opera Software\Opera Stable` or `Opera GX Stable` in `Default` or `Profile N` directories. Legacy root-level layouts, Opera side profiles and portable installs are not detected. Includes the Opera registry and Roaming-root contribution from @mvanhorn in #2980 (refs #2957).
+
+### Fixed
+- Windows v10 cookies from current Chromium databases decrypted with 32 bytes of hash in front of the value, so imports could report success while the site stayed signed out. The SHA-256(host_key) prefix is now removed when present, for Chrome, Chromium, Edge and Brave as well as Opera.
+- App-Bound Encryption rows in a browser without native extraction keep their receipt (counts and reasons) and name the recovery: `$B handoff`, sign in, `$B resume`. Partial imports warn that the session may not be restored.
+- Missing browsers, missing profiles and ambiguous profile selection now say what was checked and what to run next, including which OS supports a browser and the typeable browser names available on this one. CLI receipts list failure reasons.
+- A relative `APPDATA` no longer redirects the Opera root.
+
+### Changed
+- BROWSER.md has a Windows Opera walkthrough and tables for receipt failure reasons and import error codes; a free test keeps the browser lists in the docs and command reference in step with the registry.
+- A Windows CI test decrypts a host-bound Opera cookie with real DPAPI through the Node server runtime. Real Opera sessions on Windows are still awaiting confirmation from the issue reporter.
+
+## [1.91.2.0] - 2026-09-25
+
+`/sync-gbrain` can check whether the current worktree's pages are readable without writing a probe page or deleting guidance when the answer is uncertain.
+
+### Fixed
+- Readiness now matches the registered source to this worktree before checking its page count, then reads a page from that same source. A foreign pin, failed read, invalid count, or unavailable service stays `unknown` and preserves existing guidance; a verified empty source can still offer reindexing.
+- The Windows readiness fixture invokes the same Bun-backed `gbrain` command through a `.cmd` shim and preserves the inherited PATH spelling and separator.
+- Importing terminal-agent helpers no longer boots the CLI or installs global process handlers; direct launches still enforce their startup-record check.
+- The developer-experience question-floor check recognizes a grounded target choice by its structure rather than one phrasing, without accepting unrelated answers.
+- Engineering review follows its preparation and complexity-gate paths in order, keeps each decision and required report write verifiable, and never enables calibration write-back without its explicit gate.
+
+### Changed
+- The PR evaluation plan includes source-scoped readiness coverage and the resulting judge and supervision budgets without reducing individual test timeouts, retries, or concurrency.
+
+## [1.91.1.0] - 2026-09-25
+
+### Fixed
+
+- Find Impeccable installed through the Claude Code plugin marketplace, including a trusted custom `CLAUDE_CONFIG_DIR`. Preserve traditional skill installs and the existing explicit-engine, PATH and standalone-cache priority.
+- Select plugin versions deterministically with strict semver ordering and support for hash-named versions. Keep a selected installation's launcher, engine and engine version together instead of borrowing an older plugin's engine.
+- Use the same strict ordering for the standalone engine cache, retaining its semver-only policy and precedence. Do not follow cache directory symlinks or repository configuration links into unrelated filesystem trees.
+- Preserve repository and symlink execution boundaries, sanitize discovery diagnostics, and quote or suppress launcher hints when a filename cannot be represented safely. Discovery never downloads or runs a launcher; engine compatibility warnings and install consent remain unchanged.
+- Compare canonical HOME paths at the trust boundary, so home-directory aliases and dotfiles repositories do not hide user-installed engines or admit private home files as scan targets.
+- Add plugin discovery, handoff, malformed-version and adversarial-path regressions, plus Windows-safe discovery cases selected by the native Windows test lane.
+
+Includes the plugin-cache discovery contribution from @SomSamantray in #2976.
+
+## [1.90.2.0] - 2026-09-24
+
+**Spend less time waiting for tests.**
+**Merge with clearer safeguards.**
+
+The local test runner uses available CPUs and removes repeated setup without removing test scenarios. Independent question checks run concurrently rather than waiting for one another. `/land-and-deploy` ties your approval to the selected PR, head and destination branch, checks server state before a merge fallback, and keeps missing deployment evidence visible.
+
+### The three numbers that matter
+
+Source: matched Linux component benchmarks in [docs/TEST_PORTFOLIO.md](docs/TEST_PORTFOLIO.md), which names the test files, workload and coverage. The live comparison runs both periodic AUQ files with five independent captures. These are separate component measurements, not a complete paid-suite or CI speedup.
+
+| Workload | Before | After | Δ |
+|---|---:|---:|---:|
+| Nine synthetic-terminal test files | 165.87s | 72.98s | −56% |
+| Publication polling and watchdog tests | 56.57s | 9.63s | −83% |
+| Two independent-question test files | 325.09s | 136.40s | −58% |
+
+The synthetic-terminal checks save about 93 seconds of repeated waiting. Question checks retain every independent trial and their original grading rules; parallel execution is not permission to substitute one successful answer for several samples.
+
+### What this means for developers
+
+Use `bun run test` for complete free validation; the quick subset is still only a feedback lane. When landing a PR, a changed target requires fresh readiness and approval. A staging check after merge no longer implies production is held, and a healthy old page does not prove the new revision deployed. Run your checks, then use `/land-and-deploy` to review the evidence before merging.
+
+### Itemized changes
+
+#### Changed
+
+- Local free-test workers follow available CPU affinity, with a minimum of one and the existing maximum of six. Explicit worker overrides and the separate CI matrix retain their behavior; Windows CI explicitly keeps its two-worker budget.
+- Deployment reports distinguish deployment status, production health, staging verification and completed rollback. Requests to stage before production stop before merge with a handoff to the configured pipeline.
+
+#### Fixed
+
+- Browser-consent checks distinguish a promised new consent question from an immediate drive offer, while still rejecting conditional drive permission before Aside is ready.
+- Review fixtures accept explicit no-change answers and coverage-reporting statements without authorizing source edits or index-flag changes.
+- Merge fallback requires authoritative confirmation that neither an auto-merge request nor a queue entry exists. Confirmed merges are never replayed, and changed heads or destination branches invalidate earlier approval.
+- Rollback distinguishes true merge commits, squash merges and rebase ranges. Failed or unverified deployment and canary checks remain visible rather than becoming success labels.
+
+#### For contributors
+
+- Repository release guidance defaults to autonomous patch bumps, including queue collisions. Merge approval remains separate.
+- Synthetic terminals signal readiness; publication tests advance a scoped clock through the original polling sequence; watchdog scenarios share compilation but retain isolated executables and state.
+- Free-only dependency exemptions are explicit, mapped dependencies take precedence, and unknown changes retain conservative paid selection. The portfolio document assigns separate responsibilities to structural tests, quality judges, native behaviors, simulations and platform integrations.
+- Native question, shared-code review and design-detector fixtures validate their actual supported interactions and executed evidence. Source-detector assertion failures are recorded after validation, with attempt-specific diagnostics retained beyond cleanup.
+
+## [1.90.0.0] - 2026-09-24
+
+Cookie imports now keep the chosen browser, profile, and destination explicit, show partial failures, and distinguish copying cookies from proving that you are signed in.
+
+### Added
+- macOS Dia discovery and profile selection, using the existing Chromium cookie reader. Live native Dia import remains unqualified; fixture coverage is not a claim of native compatibility.
+- Optional sign-in verification against an exact, visible identity assertion on the selected destination, with separate copied and verified results.
+- Explicit current-origin storage recovery. Storage is preserved by default; an opted-in reset clears that origin's localStorage and only the target tab's sessionStorage.
+
+### Fixed
+- Prefer renamed profiles from Local State, distinguish duplicate names, and require selection rather than guessing among plausible accounts. Bare and dotted domain selections now match the intended cookie scope without broadening it.
+- Register picker imports with the browser's imported-domain security guard, reject cross-origin picker mutations, and bind asynchronous operations to their original destination. Opening another picker makes old windows fail closed instead of silently changing their target.
+- Show complete, partial, zero, and failed imports accurately. Stale discovery responses and duplicate submissions no longer overwrite the current picker state.
+- Bound credential subprocess output and cleanup, retry only transient database reads, and prevent automatic replay of cookie-import mutations. The Node server uses a real read-only SQLite adapter.
+
+### Changed
+- Picker handoff codes last five minutes and remain single-use. Browser guidance explains profile selection, storage-reset consent, and the difference between copied cookies and verified sign-in.
+- Native Windows extraction uses a sandboxed, owned-process, pipe-only path with bounded cleanup and no TCP fallback. Its qualification allowlist is empty in this release, so encrypted-cookie extraction through this path stays disabled with manual-sign-in guidance.
+- Added isolated platform qualification, launch diagnostics, and regression coverage. Native Dia and protected default-profile Windows qualification remain incomplete; diagnostic passes do not count as successful imports.
+
+## [1.89.1.0] - 2026-09-24
+
+### Removed
+
+- **Continuous checkpoint commits.** Skills no longer ask users to enable automatic `WIP:` commits or instruct agents to create them. The checkpoint mode and push settings are no longer advertised or consumed, and existing saved settings are left untouched.
+- **Checkpoint-specific shipping cleanup.** `/ship` no longer exports checkpoint context or rewrites WIP history. It keeps its normal bisectable commit workflow and proceeds directly to verification when changes are already committed. Explicit `/context-save` and `/context-restore` remain available.
+
+### Fixed
+
+- **Native DevEx evaluation replies.** The test driver recognizes the editor hint shown when Claude Code focuses a custom answer, while still checking the exact question and reply before submitting.
+- **Shared-code review evaluation replies.** The no-change driver can use an explicit preservation description to interpret a shorthand label, while still rejecting mixed fix/skip choices and ambiguous answers.
+- **Windows timeout test readiness.** The process-cleanup regression waits for a live descendant before firing its registered deadline, while a separate real-clock case keeps startup bounded.
+- **Design consultation workflow.** Font and design rules now precede proposal drafting and independent input. Optional-browser routing, existing-system choices, preview feedback and command/session requirements are explicit, and token extraction cannot write the project's design file before approval.
+- **Shipping and engineering-review gates.** Missing dispatched reviewers now have an explicit stop/resume path, late shipping fixes return through fresh review, and evidence recovery distinguishes stale inputs from an unavailable ledger. Engineering review separates scope assessment, selector answers and remedy decisions, with ordered preparation and recovery.
+
+## [1.89.0.0] - 2026-09-24
+
+**Find shared code worth keeping.**
+**Get the evidence before you extract it.**
+
+`/deslop-shared-libs` finds places where sharing code could remove duplication and prevent repeated fixes. It starts with the preceding 14 UTC days of commits and PRs, plus relevant work on your branch, then follows the callers and helpers behind promising candidates. Each recommendation names compatible source locations, a small helper, the tests needed, and estimated savings after integration work. The skill recommends changes and stops; it does not edit your project or create issues or PRs.
+
+### The three numbers that matter
+
+Source: the workflow contracts in `deslop-shared-libs/SKILL.md.tmpl`, `plan-eng-review/sections/review-sections.md.tmpl`, and `review/SKILL.md.tmpl`, plus the generated catalog census. Run `bun test test/shared-libs-rendering.test.ts test/catalog-budget.test.ts` to verify distribution and catalog size. These are feature and source-size counts against v1.87.5.0, not performance measurements.
+
+| Metric | Before | After | Δ |
+|---|---:|---:|---:|
+| Dedicated recent-work shared-code audit skills | 0 | 1 | +1 |
+| Parent reviews using the shared-code rubric | 0 | 2 | +2 |
+| Generated catalog name and description bytes | 4,593 | 4,675 | +82 |
+
+`/plan-eng-review` and `/review` now apply the same criteria within the plan or diff you are already reviewing. They check existing helpers, caller compatibility, tests, and the risk of sharing a bug. They do not run the broader history audit.
+
+### What this means for developers
+
+You get up to five supported opportunities and up to three recommendations, with PR-covered work separated and missing evidence disclosed. Optional extractions require approval and do not lower the review score or block a clean result. A skipped extraction is reused only when its identity, branch, and verified source snapshot still match; actual defects keep normal fix handling. Run `/deslop-shared-libs`, or name a narrower area and time window.
+
+### Itemized changes
+
+#### Added
+
+- **`/deslop-shared-libs` recommends useful shared-code extractions.** Reports link authored callers, prefer existing helpers, account for tests and integration, and explain reliability gains and risks. Generated and third-party copies do not count toward savings. Fewer recommendations, including none, are valid.
+- **Recent work includes PR overlap checks.** The audit distinguishes code changes from comment activity, checks relevant older open PRs within a bounded scan, charges repeated page requests against the limit, and reports inaccessible history or truncated coverage. API reads never create response files, including temporary files outside the project.
+
+#### Changed
+
+- **Engineering plans and code reviews share one extraction rubric.** `/plan-eng-review` can evaluate proposed callers with labeled assumptions. `/review` checks actual changed code and related callers even for small diffs and Codex installations without Review Army.
+- **Extraction advice stays separate from defects.** Advice requires approval, survives review persistence with its source evidence, and cannot suppress a real defect. Reusing a previous skip requires matching structural identity, verified source coverage, and branch binding.
+- **Decision briefs retain their headings and closing tradeoff in native question tools.** The question carries its pros-and-cons heading and final summary; options retain their own benefits and drawbacks.
+
+#### For contributors
+
+- Added generated-host, discovery, identity, fixture, source-binding, and behavioral coverage. Gate evaluations exercise read-only access and the review action/persistence lifecycle; periodic evaluations cover ranking, PR overlap, and live Codex behavior.
+- Coverage evaluations now recognize complete combined source reads and explicit diagram legends while retaining checks for source ownership, missing output, and contradictory evidence.
+- First-question evaluations capture public native questions with a restricted tool set. Mode selection uses the actual question-tool callback and stops without answering. Provider failures and stale output remain failures. Interactive captures survive fixture cleanup when an output directory is configured, including local runs without a named run ID.
+
+## [1.88.1.0] - 2026-09-22
+
+Credential masking follows the exact detected source, and pre-push scans follow the actual destination. Browser agents and CSO operations retain precise ownership, while settings updates and artifact reinitialization preserve user-owned data.
+
+### Fixed
+- Credential masking uses original spans mapped from normalized matches, so anchored assignments, repeated values, Unicode and entity input redact the flagged value without masking a later neighbor. Sanitizable CSO source stays readable as masked text; unmaskable payloads remain withheld.
+- Pre-push scans bind their ranges to the destination's name and effective URL, including separate push URLs. Missing advertised objects use a conservative range, SHA-256 repositories get the correct empty tree, and bounded slices retain normalized proximity context without fabricating line anchors or duplicate findings. Unscannable long lines or context windows still block explicitly.
+- Hermetic evaluation children reject credential-shaped variables admitted through broad CI prefixes, while preserving CI metadata, named provider authentication and explicit runner overrides.
+- Browser agents belong to the persistent daemon and an exact process generation. Replacement requires confirmed exit, failed startup retains uncertain children, and publication and shutdown share a lock so older generations cannot delete a successor's discoverability files. Repeated failed respawns are bounded. Uncertain ownership and abandoned publication locks require manual recovery rather than a process sweep.
+- CSO lease recovery preserves 64-bit filesystem identities and nanosecond timestamps instead of rounding them. Adjacent identities remain distinct, replaced files remain protected, and ambiguous legacy state is still refused.
+- Settings mutations, backups and rollback resolve the selected symlink target and share its canonical lock. Links, private file modes and unrelated settings survive; changed or invalid targets are refused.
+- Artifact reinitialization updates managed allowlist entries while retaining the user suffix byte-for-byte, including comments and a missing final newline. Ambiguous markers and failed reads or assembly leave the original allowlist intact.
+
+### Changed
+- Required native macOS checks cover agent lifecycle, concurrent shutdown and linked settings. The native Windows CSO suite exercises repeated commands and exact high-ID lease recovery on NTFS.
+
+## [1.87.6.0] - 2026-09-18
+
+**Review gates keep their proof.**
+**Coverage audits read the code first.**
+
+Plan reviews now keep decisions, report checks, and publication checks in order when permissions, stale choices, or host metadata writes fail. Coverage audits for `/review`, `/ship`, and plan reviews read concrete source and test files before drawing their diagrams, so gaps are tied to code paths instead of diff and config noise.
+
+Generation now validates every host and expected artifact, and Codex evaluation records retain failed execution and assertions. Plan reviews carry approved decisions through scope changes and save complete reports before declaring completion. CEO and engineering reviews save and verify each question before asking it; Autoplan reads and verifies the current plan, then publishes the parent phase report before advancing.
+
+### Fixed
+- PR evaluation plans keep a small changed-behavior profile and selected quality judges, while weekly and manual runs retain fresh broad coverage. Deferred checks remain visible. Verified workflow-judge passes can be reused within the same PR for 24 hours only when their complete inputs and runtime match.
+- Free tests use a refreshed timing inventory and balanced isolated CI runners. `test:quick` provides an explicit partial feedback run; the complete suite remains required. Collection fixtures wait for actual readiness instead of repeating fixed startup delays. Recovered retries retain their original failure logs. Windows fixtures handle native paths and give independent scenarios separate deadlines; prepared Git fixtures disable background maintenance before copying.
+- `/plan-ceo-review` and `/plan-eng-review` preserve scoped decisions, required save/read-back checks, and report publication before declaring completion or advancing to the next section.
+- Coverage audits read source and test files in a dedicated step before mapping `[OK]` and `[GAP]` rows, while keeping framework and config context separate.
+- `/plan-eng-review` clarifies setup gates, targeted audit timing, report ordering, and Outside Voice output surfaces without losing saved-question verification.
+- The plan-count timeout fixture closes stdin without forcing process exit before diagnostics can be captured.
+- Ship host golden files and parity size guards match the generated Codex, Factory, and plan-review outputs.
+- Skill generation awaits every artifact across all hosts. Freshness checks detect missing output, validate generated content, preserve files and directories during dry runs, and report generation errors instead of accepting partial output.
+- Codex evaluation records follow the runner result and assertions. Timeouts, failed validations, inherited output pipes, and interrupted attempts retain their actual outcomes, captured usage, and bounded cleanup.
+- Paid test supervision allows each file to finish its existing cases and configured retries. CI and detached-run limits cover the full schedule without increasing model work budgets.
+- `gstack-decision-log --help` explains the accepted payload and safe shell quoting without creating state.
+- Plan reviews preserve the selected mode and prior approvals, compare each option against independent changes, and verify complete reports before recording completion. Engineering reviews assign independent decisions before drafting options, then audit and save the complete question before presenting it. Accepted scope includes the full selected option and its conditions; conflicting wording requires a corrected question and another answer. DX reviews use the same onboarding milestone for benchmarks, targets, examples, and measurement, and carry required factual verification forward without unnecessary approval questions. Outside-review suggestions use explicit approval menus; a dependency conflict returns to the affected decision before the plan is declared ready.
+- `/plan-ceo-review` follows ordered phases and carries every existing approval through scope changes, including reviews with no new approach choice. It saves the complete question, option facts, and source references, then verifies the actual outgoing question against those saved fields and sends it unchanged. It applies file permissions consistently to plans, reports, tasks, and review metadata. When writes are forbidden, it carries complete review inputs in chat and labels them not persisted. A failed save stops completion. Unavailable reviewers and missing scores remain unavailable instead of inheriting a prior score.
+- Design skills save mockups, previews, and approved designs under the configured state directory, and later steps discover them there. CEO plan discovery also follows the configured state directory in design input detection and prior-plan context.
+- `/autoplan` loads each review's complete instructions, waits for asynchronous reviewers, and sends the current amended plan to spec reviewers. Each phase reloads its closing steps and verifies the full current plan before announcing completion; amendment checkpoints stay separate from reviewer inputs. Native review drivers acknowledge current questions and permissions promptly, reject stale frames and late completions, and recognize the offered manual handoff.
+- `/office-hours` preserves structured review evidence through completion, keeps supported handoff content when replacing review sections, and develops distinct builder ideas. `/setup-gbrain` handles fresh state, remote-only sharing declines, and interrupted attempts without leaking fixture state.
+- Terminal sessions drain output before reporting completion. Browser shutdown cleans up only the configured server instance. Pairing fixtures use checked ports and bounded cleanup. Deprecated-flag scans exclude workspace caches before searching and propagate command and filesystem failures.
+- CSO public reports redact repository roots regardless of their path, while private snapshots retain the identity needed for verification. CSO also rejects a remote Docker endpoint with the correct diagnostic even when Docker is not installed.
+
+### Changed
+- CEO, engineering and Autoplan instructions fit their existing prompt-size limits while retaining approval, saved-question verification and report-publication requirements. Engineering uses one section-loading step and one approval check, with explicit rules for independent choices and unchanged question payloads.
+- Review fixtures provide the application context and independent contracts their assertions require, declare supported editing and feedback interfaces, and verify existing rollback behavior. The DX count scenario covers a bounded onboarding decision checkpoint and defers independent roadmap work. Design evaluations submit real board feedback before acknowledging it and grant image reads only inside their owned artifact directory. Sol evaluations generate skills in private storage without replacing checkout caches. Native fixtures match complete permission text and offered handoff choices. Shared helper and source-template dependencies select the affected evaluations; overlay tests distinguish correctness from performance measurements.
+- Contributor instructions require focused reproductions and adjacent checks before paid evaluations, independent scheduling, launcher preflight with executed-case counts, reuse of passing checks with unchanged inputs, and one full free-suite acceptance run after the code is frozen. Recurring parser failures require checking the supported input class against the pinned runtime.
+
+## [1.87.5.0] - 2026-09-17
+
+**Tests finish sooner without dropping checks.**
+**CI stops waiting on unused tooling.**
+
+This release speeds up gstack's development feedback loop. Terminal-driven checks react to new output instead of waiting through a fixed polling interval. Synthetic CLIs can announce when their input handlers are ready, while real CLI sessions retain their startup grace and input debounces. Completed processes no longer stay alive just to finish unused timeout timers.
+
+### The three numbers that matter
+
+Measured on the same Linux machine with Bun 1.4.0. Run each named file with `bun test <file>` on the previous release and this version. The polyfill and daemon numbers are three-run wall-time medians on both sides; the permission baseline is one observed run, and its after value is a three-run median. These are individual test-file measurements, not whole-suite or production latency claims.
+
+| Test file | Before | After | Δ |
+|---|---:|---:|---:|
+| `browse/test/bun-polyfill.test.ts` | 17.30s | 1.29s | −93% |
+| `design/test/daemon-discovery.test.ts` | 17.78s | 11.99s | −33% |
+| `test/plan-count-file-permission.test.ts` | 97.05s | 30.92s | −68% |
+
+The permission suite still makes all 115 assertions, including its deliberate stale-prompt delay. Terminal observations are capped at four per second so animated output cannot turn faster responses into a busy loop.
+
+### What this means for contributors
+
+Local test runs spend less time waiting after work is already complete. CI planning no longer pulls the execution image or waits for image lookup before producing its manifest; executors still require both prerequisites, and missing or failed results still fail reconciliation. Run `bun run test` for the complete free suite.
+
+### Itemized changes
+
+#### For contributors
+
+- Wake plan-count checks on output and exit, retain a silent metadata fallback, and settle output bursts before reading split redraws. Three synthetic CLI suites use explicit startup readiness without changing real-CLI startup behavior.
+- Cancel unused PTY and Node deadlines, stop already-exited daemon fixtures immediately, clear cookie-picker fixture sessions between suites, and await watchdog shutdown with a bounded completion signal.
+- Await telemetry append completion in consent tests instead of assuming disk writes finish within 30ms. Consent checks and error swallowing are unchanged.
+- Run gate and periodic CI planners directly on pinned Bun without dependency installation. Reports also skip unused installs; fork restrictions, executor images, and failure checks remain intact.
+- Retain failed eval shard logs from the hidden CI cache directory without uploading unrelated cache files.
+- Inject the CSO Git-pointer race at its first bounded read, preserving the original rejection assertion.
+- Preload the UI-positive design-review eval in an isolated plan fixture and require an answered native design question, rather than accepting scope or outside-review menus. Bind command-rejection checks to the invoked skill, not a child tool's diagnostics.
+- Generate skill documentation in a fresh checkout without importing browser runtime dependencies. Keep snapshot flag metadata and public exports unchanged.
+- Eliminate early-reader pipe races in artifact URL normalization and safety-hook matching. Multiline commands retain their warnings even with large trailing content.
+- Treat a publication removed by another CSO recovery helper during candidate enumeration as a bounded retry; replacement inodes still fail closed.
+
 ## [1.87.4.0] - 2026-09-16
 
 **Failed checks stay failed.**

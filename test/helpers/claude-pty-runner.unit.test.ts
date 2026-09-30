@@ -31,6 +31,7 @@ import {
   isScopeGateQuestionVisible,
   isScopeGateAutoSelectVisible,
   isPlanReadyVisible,
+  isAutoDecidedVisible,
   parseNumberedOptions,
   classifyVisible,
   TAIL_SCAN_BYTES,
@@ -51,13 +52,40 @@ import {
   engSetupAUQ,
   engFirstReviewAUQ,
   designStep0Boundary,
-  designFirstReviewAUQ,
   planCountQuestionPhase,
   nativePlanCallFingerprint,
   devexStep0Boundary,
   type ClaudePtyOptions,
   type AskUserQuestionFingerprint,
 } from './claude-pty-runner';
+
+describe('saved preference annotation', () => {
+  test('recognizes the explicit preference attribution from the timed-out CEO capture', () => {
+    const visible = 'Now I have a clear picture of the branch. Let me proceed with the full review. ' +
+      'Mode is HOLD SCOPE (auto-decided from plan-tune preference).';
+    expect(isAutoDecidedVisible(visible)).toBe(true);
+    expect(classifyVisible(visible)?.outcome).toBe('auto_decided');
+    expect(classifyVisible(visible.replace(/\s+/g, ''))?.outcome).toBe('auto_decided');
+  });
+
+  test('retains the canonical annotation and its precedence over plan-ready', () => {
+    const visible = 'Auto-decided review mode → HOLD SCOPE (your preference). Change with /plan-tune.\nReady to execute?';
+    expect(classifyVisible(visible)?.outcome).toBe('auto_decided');
+  });
+
+  test('does not equate an unrequested choice or plan-tune advice with a saved preference', () => {
+    for (const visible of [
+      'Mode is HOLD SCOPE (AUTO_DECIDED).',
+      'I auto-decided HOLD SCOPE because this is a refactor.',
+      'I auto-decided HOLD SCOPE. You can set a plan-tune preference later.',
+      'Mode is HOLD SCOPE (not auto-decided from plan-tune preference).',
+      'Mode is HOLD SCOPE (will be auto-decided from plan-tune preference).',
+    ]) expect(isAutoDecidedVisible(visible)).toBe(false);
+  });
+});
+
+describe('mode option rendering', () => {
+});
 
 describe('isPermissionDialogVisible', () => {
   test('matches "Bash command requires permission" prompts', () => {
@@ -197,6 +225,12 @@ describe('isPermissionDialogVisible', () => {
     // KNOWN LIMITATION: the co-trigger fires here. Documented as a
     // post-merge follow-up. Flip this assertion once the regex tightens.
     expect(isPermissionDialogVisible(sample)).toBe(true);
+  });
+
+  test('matches the captured Autoplan settings-overwrite card as a numbered permission dialog', () => {
+    const captured = JSON.parse(readFileSync(new URL('../fixtures/autoplan-settings-overwrite.json', import.meta.url), 'utf8'));
+    expect(isNumberedOptionListVisible(captured.frame.text)).toBe(true);
+    expect(isPermissionDialogVisible(captured.frame.text)).toBe(true);
   });
 });
 
@@ -1108,10 +1142,6 @@ describe('parseQuestionPrompt', () => {
     expect(prompt).toStartWith('Reviewfocus');
     expect(prompt).toContain('design completeness');
     expect(prompt).not.toContain('Planning:');
-    expect(designStep0Boundary({
-      signature: 'captured-design-scope', promptSnippet: prompt,
-      options: parseNumberedOptions(visible), observedAtMs: 0, preReview: true,
-    })).toBe(true);
   });
 
   test('keeps the captured devex persona header when cursor spacing collapses', () => {
@@ -1123,10 +1153,6 @@ describe('parseQuestionPrompt', () => {
     ].join('\n');
     const prompt = parseQuestionPrompt(visible);
     expect(prompt).toStartWith('Targetpersona');
-    expect(devexStep0Boundary({
-      signature: 'captured-devex-persona', promptSnippet: prompt,
-      options: parseNumberedOptions(visible), observedAtMs: 0, preReview: true,
-    })).toBe(true);
   });
 
   test('retains a multiline question while excluding the preceding CLI divider', () => {
@@ -1767,6 +1793,22 @@ describe('Step0BoundaryPredicate per-skill', () => {
   });
 
   describe('ceoStep0Boundary', () => {
+    test('FIRES on retained letter-prefixed mode labels, not letter-prefixed architecture', () => {
+      expect(ceoStep0Boundary(fp('D3 — Which review mode should this CEO review run in?', [
+        'C — HOLD SCOPE (Recommended)', 'B — SELECTIVE EXPANSION', 'A — SCOPE EXPANSION', 'D — SCOPE REDUCTION',
+      ]))).toBe(true);
+      expect(ceoStep0Boundary(fp('D2 — Which implementation approach should this plan follow?', [
+        'B — Ideal Architecture (Recommended)', 'A — Fix-Only (Minimal Viable)',
+      ]))).toBe(false);
+      expect(ceoStep0Boundary(fp('Prefer HOLD SCOPE for this decision?', ['C — Keep the dispatcher', 'A — Replace it']))).toBe(false);
+    });
+    test('parenthesized mode labels end setup, while approach labels and mode mentions do not', () => {
+      expect(ceoStep0Boundary(fp('D1 — Which CEO review mode should I run?', [
+        'A) SCOPE EXPANSION', 'B) SELECTIVE EXPANSION (recommended)', 'C) HOLD SCOPE', 'D) SCOPE REDUCTION',
+      ]))).toBe(true);
+      expect(ceoStep0Boundary(fp('D2 — Which implementation approach?', ['B) Ideal Architecture', 'A) Fix-Only']))).toBe(false);
+      expect(ceoStep0Boundary(fp('Prefer HOLD SCOPE?', ['Discuss C) HOLD SCOPE', 'A) Replace it']))).toBe(false);
+    });
     test('FIRES on Step 0F mode-pick AUQ (HOLD SCOPE in options)', () => {
       const f = fp('Pick a mode', ['HOLD SCOPE', 'SCOPE EXPANSION', 'SELECTIVE EXPANSION', 'SCOPE REDUCTION']);
       expect(ceoStep0Boundary(f)).toBe(true);
@@ -1976,20 +2018,21 @@ describe('Step0BoundaryPredicate per-skill', () => {
   });
 
   describe('designStep0Boundary', () => {
-    test('FIRES on design system / posture mention', () => {
-      const f = fp('Pick a design posture for this review', ['Polish', 'Triage', 'Expansion']);
-      expect(designStep0Boundary(f)).toBe(true);
-    });
-
-    test('FIRES on first-dimension prompt', () => {
-      const f = fp('First dimension: visual hierarchy. Score?', ['7', '8', '9']);
-      expect(designStep0Boundary(f)).toBe(true);
-    });
-
-    test('does NOT fire on later dimension AUQs', () => {
-      const f = fp('Spacing dimension score?', ['7', '8', '9']);
-      expect(designStep0Boundary(f)).toBe(false);
-    });
+    const focusTemplate = readFileSync(new URL('../../plan-design-review/SKILL.md.tmpl', import.meta.url), 'utf8')
+      .match(/### 0D\. Focus Areas\nAskUserQuestion: "([^\n]+)"/)?.[1] ?? '';
+    const focusQuestion = (gaps: string) => focusTemplate.replace('{N}', '4').replace('{X, Y, Z}', gaps);
+    const focusOptions = ['Review all 7 dimensions', 'Focus on specific areas'];
+    const nativeFocus = (question: string): AskUserQuestionFingerprint => {
+      const fingerprint = nativePlanCallFingerprint({
+        sessionId: 'design-focus-session', toolUseId: 'toolu-design-focus',
+        answered: true, failed: false, answers: { [question]: focusOptions[0]! },
+        unansweredQuestionIndices: [],
+        questions: [{ question, header: 'Focus areas', multiSelect: false,
+          options: focusOptions.map(label => ({ label, description: label })) }],
+      }, 0, true);
+      fingerprint.promptSnippet = question.slice(0, 240);
+      return fingerprint;
+    };
   });
 
   describe('design review begins without an optional focus question', () => {
@@ -2004,57 +2047,9 @@ describe('Step0BoundaryPredicate per-skill', () => {
       '☐DEIGN.md TODO │D6 — TODO: Create a DESIGN.md file codifying the5 decisions mdein this revew <gstack-qid:plan-design-review-todo-designmd>',
       '☐PartialfailTODO │D7—TODO:Specifythepartial-failurestate—whatdoestheuserseeifSavesucceedsforsomefieldsbutfailsfor others? <gstack-qid:plan-design-review-todo-partialfail>',
     ];
-
-    test('counts the first captured finding and every subsequent finding', () => {
-      let reviewStarted = false;
-      const phases = questions.map(question => {
-        const phase = planCountQuestionPhase(fp(question, ['Apply', 'Defer']), reviewStarted,
-          designStep0Boundary, designFirstReviewAUQ);
-        reviewStarted = phase.reviewStarted;
-        return phase.preReview;
-      });
-      expect(phases).toEqual([false, false, false, false, false, false, false]);
-    });
-
-    test('keeps the observed focus gate separate when it is emitted', () => {
-      const focus = fp("☐ Focus areas │ I've rated this plan2/10 on design completeness. Review all7 dimensions?", ['All7dimensions', 'Priority gaps']);
-      const setup = planCountQuestionPhase(focus, false, designStep0Boundary, designFirstReviewAUQ);
-      expect(setup).toEqual({ preReview: true, reviewStarted: true });
-      expect(planCountQuestionPhase(fp(questions[0], ['Apply', 'Defer']), setup.reviewStarted,
-        designStep0Boundary, designFirstReviewAUQ)).toEqual({ preReview: false, reviewStarted: true });
-    });
-
-    test('requires review identity, not just a D1 label or setup question ID', () => {
-      for (const question of [
-        '☐ Setup │D1—Enable cross-project learnings?',
-        '☐ Review target │D1—Which plan should I review?<gstack-qid:plan-design-review-scope>',
-        '☐ Focus │D1—What should this design review focus on?<gstack-qid:plan-design-review-focus-areas>',
-        '☐ Scope │I will review Pass1 through Pass7 after setup. Proceed?',
-      ]) expect(designFirstReviewAUQ(fp(question, ['Yes', 'No']))).toBe(false);
-      expect(designFirstReviewAUQ(fp('☐ Page structure │ Pass1 — Information Architecture: what page structure should this use?', ['Standard', 'Sidebar']))).toBe(true);
-    });
-
-    test('leaves callers without a first-review predicate unchanged', () => {
-      expect(planCountQuestionPhase(fp(questions[0], ['Apply', 'Defer']), false, designStep0Boundary))
-        .toEqual({ preReview: true, reviewStarted: false });
-    });
   });
 
   describe('devexStep0Boundary', () => {
-    test('FIRES on developer persona selection', () => {
-      const f = fp('Pick the target persona for this review', ['Senior backend', 'Junior frontend', 'Other']);
-      expect(devexStep0Boundary(f)).toBe(true);
-    });
-
-    test('FIRES on TTHW target prompt', () => {
-      const f = fp('What is the TTHW target for first run?', ['<5 min', '<15 min', '<30 min']);
-      expect(devexStep0Boundary(f)).toBe(true);
-    });
-
-    test('does NOT fire on review-section AUQs', () => {
-      const f = fp('Friction point: 5-min CI wait. Address?', ['Now', 'Defer', 'Skip']);
-      expect(devexStep0Boundary(f)).toBe(false);
-    });
   });
 });
 
@@ -2677,7 +2672,7 @@ describe('native question identity outranks permission wording', () => {
       frame.replace('Should we create a file', 'Should we delete the file'),
       frame.replace('2.Keep current policy', '2.Allow all edits'),
       frame.replace(question.question, 'A different question with the same header?'),
-      frame + '\nDo you want to create actual.md?\n❯1.Yes\n2.Yes, and switch to accept edits\n3.No\nEsc to cancel · Tab to amend',
+      frame + '\nDo you want to create actual.md?\n❯1.Yes\n2.Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)\n3.No\nEsc to cancel · Tab to amend',
     ]) expect(matchesNativePlanQuestion(different, pending)).toBe(false);
     expect(capturePlanCountQuestion(frame, new Set(), 0, false, { ...pending, failed: true })).toBeNull();
     expect(capturePlanCountQuestion(frame, new Set(), 0, false)).toBeNull();

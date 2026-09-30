@@ -62,7 +62,7 @@ afterAll(() => {
  * The STATUS-key contract. Post-Phase-2 these split into two consumers:
  * keys the rendered prose still interprets directly (SESSION_KIND,
  * CONDUCTOR_SESSION, SESSION_ID/TEL_START, EXPLAIN_LEVEL, QUESTION_TUNING,
- * PROACTIVE, SKILL_PREFIX, REPO_MODE, CHECKPOINT_*, GSTACK_PLAN_MODE,
+ * PROACTIVE, SKILL_PREFIX, REPO_MODE, GSTACK_PLAN_MODE,
  * ARTIFACTS_SYNC, ...) and keys the script's OWN emission gates consume
  * (ACTIVATED, FIRST_TASK, LAKE_INTRO, TEL_PROMPTED, PROACTIVE_PROMPTED,
  * HAS_ROUTING, ROUTING_DECLINED, VENDORED_GSTACK, ...). Both classes stay in
@@ -93,8 +93,6 @@ const PROSE_REFERENCED_KEYS = [
   'ROUTING_DECLINED',
   'VENDORED_GSTACK',
   'MODEL_OVERLAY',
-  'CHECKPOINT_MODE',
-  'CHECKPOINT_PUSH',
   'GSTACK_PLAN_MODE',
   'ARTIFACTS_SYNC',
 ];
@@ -135,6 +133,26 @@ describe('gstack-skill-start contract', () => {
 });
 
 describe('gstack-skill-start behavior', () => {
+  for (const legacy of [false, true]) {
+    test(`checkpoint commits stay retired with ${legacy ? 'legacy opt-in' : 'fresh'} state`, () => {
+      const state = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-ss-retired-'));
+      const config = 'update_check: false\n' + (legacy ? 'checkpoint_mode: continuous\ncheckpoint_push: true\n' : '');
+      fs.writeFileSync(path.join(state, 'config.yaml'), config);
+      if (legacy) fs.writeFileSync(path.join(state, '.feature-prompted-continuous-checkpoint'), '');
+      try {
+        const output = runStart([], {
+          GSTACK_HOME: state,
+          GSTACK_CHECKPOINT_MODE: 'continuous',
+          GSTACK_CHECKPOINT_PUSH: 'true',
+        });
+        expect(output).not.toMatch(/checkpoint|auto-commit|WIP:/i);
+        expect(output).toContain('GSTACK_INSTRUCTION_BEGIN: feature-overlay');
+        expect(fs.readFileSync(path.join(state, 'config.yaml'), 'utf8')).toBe(config);
+        expect(fs.existsSync(path.join(state, '.feature-prompted-continuous-checkpoint'))).toBe(legacy);
+      } finally { fs.rmSync(state, { recursive: true, force: true }); }
+    });
+  }
+
   test('sanitizes GSTACK_INSTRUCTION markers out of passthrough output (OV4)', () => {
     // Poison the learnings passthrough: >5 entries triggers learnings-search
     // passthrough; simplest deterministic injection point is FIRST_TASK via a
@@ -313,21 +331,6 @@ describe('gstack-skill-start behavior', () => {
     const localStart = path.join(projectSkillRoot, 'bin', 'gstack-skill-start');
     const env = { PATH: process.env.PATH!, HOME: tmpHome, GSTACK_HOME: freshGh };
     try {
-      const checkpoint = execFileSync(localStart, ['--skill', 'testskill'], {
-        timeout: 30_000,
-        encoding: 'utf-8',
-        cwd: projectRoot,
-        env,
-      });
-      expect(checkpoint).toContain(
-        `touch "${path.join(freshGh, '.feature-prompted-continuous-checkpoint')}"`,
-      );
-      expect(checkpoint).not.toContain('GSTACK_INSTRUCTION_BEGIN: feature-overlay');
-      expect(checkpoint).not.toContain(
-        path.join(projectSkillRoot, '.feature-prompted-continuous-checkpoint'),
-      );
-
-      fs.writeFileSync(path.join(freshGh, '.feature-prompted-continuous-checkpoint'), '');
       const overlay = execFileSync(localStart, ['--skill', 'testskill'], {
         timeout: 30_000,
         encoding: 'utf-8',
@@ -365,6 +368,40 @@ describe('gstack-skill-start behavior', () => {
   test('ARTIFACTS_SYNC reports off in a cold home', () => {
     const out = runStart();
     expect(out).toMatch(/^ARTIFACTS_SYNC: off$/m);
+  });
+
+  test('artifacts-sync consent is asked before any artifacts egress, and only in interactive sessions', () => {
+    const gh = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-ss-privacy-'));
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-ss-privacy-bin-'));
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-ss-privacy-remote-'));
+    const git = (args: string[], cwd: string) => execFileSync('git', args, { cwd, timeout: 30_000, stdio: 'pipe' });
+    try {
+      fs.writeFileSync(path.join(bin, 'gbrain'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      git(['init', '-q', '--bare'], remote);
+      git(['init', '-q', '-b', 'main'], gh);
+      git(['remote', 'add', 'origin', remote], gh);
+      const pullStamp = path.join(gh, '.brain-last-pull');
+      const start = (config: string, env: Record<string, string> = {}) => {
+        fs.writeFileSync(path.join(gh, 'config.yaml'), `update_check: false\n${config}`);
+        return runStart([], { GSTACK_HOME: gh, PATH: `${bin}${path.delimiter}${process.env.PATH}`, ...env });
+      };
+      const gates = (out: string) => (out.match(/^GSTACK_INSTRUCTION_BEGIN: privacy-stop-gate/gm) ?? []).length;
+
+      const pending = start('');
+      expect(gates(pending)).toBe(1);
+      expect(pending).toContain('How much should sync?');
+      expect(pending).toMatch(/^ARTIFACTS_SYNC: off$/m);
+      expect(fs.existsSync(pullStamp)).toBe(false);
+
+      expect(gates(start('', { GSTACK_SESSION_KIND: 'spawned' }))).toBe(0);
+      expect(fs.existsSync(pullStamp)).toBe(false);
+
+      const consented = start('artifacts_sync_mode: full\nartifacts_sync_mode_prompted: true\n');
+      expect(gates(consented)).toBe(0);
+      expect(fs.existsSync(pullStamp)).toBe(true);
+    } finally {
+      for (const dir of [gh, bin, remote]) fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -11,8 +11,11 @@
 # Enumerated divergences from the inline original (plan EOV5):
 #   - Paths resolve $0-relative (works for every host + install layout) instead
 #     of gen-time interpolation.
-#   - --parent-pid carries the HARNESS pid for session counting ($PPID inside
-#     this script is the ephemeral tool-call shell — wrong identity).
+#   - Session identity is the HARNESS pid, derived here: the nearest non-shell
+#     ancestor ($PPID inside this script is the ephemeral tool-call shell —
+#     wrong identity). --parent-pid still overrides it. The rendered command
+#     passes no "$PPID" (#2763: worktree-isolated Claude Code sessions refuse
+#     variables and fallbacks in the start command).
 #   - State paths honor ${GSTACK_HOME} (EOV7); the inline original hardcoded
 #     ~/.gstack in the bootstrap half.
 #   - SESSION_ID / TEL_START are echoed (the inline shell vars never survived
@@ -36,7 +39,7 @@ BASH_COMPAT=50
 
 SKILL_NAME=""
 MODEL_OVERLAY="none"
-PARENT_PID="$PPID"
+PARENT_PID=""
 BRAIN_HEALTH="no"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -49,9 +52,29 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$SKILL_NAME" ] || SKILL_NAME="unknown"
 
+# Harness pid: walk up from the calling shell past shell wrappers. Claude
+# Code runs this under a per-call `bash -c`, whose parent is the harness; a
+# host that execs the command directly is already the parent. Without a
+# usable ps (some Windows shells) the immediate parent stands.
+if [ -z "$PARENT_PID" ]; then
+  PARENT_PID="$PPID"
+  _hops=0
+  while [ "$_hops" -lt 8 ]; do
+    _comm=$(ps -o comm= -p "$PARENT_PID" 2>/dev/null | head -1) || break
+    _comm=${_comm##*/}; _comm=${_comm#-}
+    case "$_comm" in bash|sh|zsh|dash|ksh|mksh|ash|fish|busybox) ;; *) break ;; esac
+    _up=$(ps -o ppid= -p "$PARENT_PID" 2>/dev/null | tr -d ' ')
+    case "$_up" in ''|*[!0-9]*|0|1) break ;; esac
+    PARENT_PID="$_up"
+    _hops=$((_hops + 1))
+  done
+fi
+
 _SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
 _BIN="$_SCRIPT_DIR"
-_GH="${GSTACK_HOME:-$HOME/.gstack}"
+. "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+gstack_state_root_select
+_GH="$_gstack_sr_root"
 
 # OV4: strip instruction markers from any passthrough text before echoing it
 # into the blessed tool result. Prior-session/repo content must not be able to
@@ -167,12 +190,19 @@ for _PF in $(find "$_GH/analytics" -maxdepth 1 -name '.pending-*' 2>/dev/null); 
   break
 done
 eval "$("$_BIN/gstack-slug" 2>/dev/null)" 2>/dev/null || true
+for _former in $("$_BIN/gstack-slug" --get FORMER_SLUGS 2>/dev/null || true); do
+  echo "gstack: earlier data for this project is in projects/$_former (a worktree's old bucket). Merge it: gstack-slug --adopt-legacy --from $_former   (or stop this reminder: gstack-slug --adopt-legacy --dismiss $_former)"
+done
 _LEARN_FILE="$_GH/projects/${SLUG:-unknown}/learnings.jsonl"
 if [ -f "$_LEARN_FILE" ]; then
   _LEARN_COUNT=$(wc -l < "$_LEARN_FILE" 2>/dev/null | tr -d ' ')
   echo "LEARNINGS: $_LEARN_COUNT entries loaded"
   if [ "$_LEARN_COUNT" -gt 5 ] 2>/dev/null; then
-    "$_BIN/gstack-learnings-search" --limit 3 2>/dev/null | _sanitize || true
+    _LEARN_ERR=$(mktemp "${TMPDIR:-/tmp}/gstack-learn-err.XXXXXX" 2>/dev/null) || _LEARN_ERR=/dev/null
+    if ! "$_BIN/gstack-learnings-search" --limit 3 2>"$_LEARN_ERR" | _sanitize; then
+      echo "LEARNINGS: unavailable ($(head -n 1 "$_LEARN_ERR" 2>/dev/null))"
+    fi
+    [ "$_LEARN_ERR" = /dev/null ] || rm -f "$_LEARN_ERR"
   fi
 else
   echo "LEARNINGS: 0"
@@ -290,12 +320,18 @@ if [ -d "$_GH/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
     # fail-closed (same wiring as bin/gstack-brain-sync's fetch/push).
     . "$_BIN/gstack-egress-lib.sh" 2>/dev/null || true
     _PULL_HOST=$(cd "$_GH" 2>/dev/null && git remote get-url origin 2>/dev/null | sed -E 's|^[a-z+]+://([^/@]*@)?([^/:]+).*|\2|; s|^([^@]+@)?([^:]+):.*|\2|' | head -1)
-    if command -v _receipted_git >/dev/null 2>&1; then
+    # The merge writes the artifacts repo's git state, so it takes the drain
+    # lock every gstack writer shares; when a drain holds it, the pull waits
+    # for the next start (no stamp).
+    . "$_BIN/gstack-brain-lock.sh" 2>/dev/null || true
+    if command -v _receipted_git >/dev/null 2>&1 && command -v gstack_brain_lock_acquire >/dev/null 2>&1 \
+        && gstack_brain_lock_acquire "$_GH" try; then
       # Non-interactive + slow-network bounded (same guards as gstack-update-check):
       # a hung remote or a credential prompt must not stall the preamble.
       ( cd "$_GH" && GSTACK_HOME="$_GH" GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=5 \
           _receipted_git closed brain-sync "${_PULL_HOST:-unknown}" curated-memory-git-fetch "artifacts_sync_mode!=off" \
           git fetch origin >/dev/null 2>&1 && git merge --ff-only "origin/$(git rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 ) || true
+      gstack_brain_lock_release
       # Stamp only when the receipted path actually ran — a missing egress lib
       # must surface as a retry next start, not a silent 24h suppression.
       echo "$_BRAIN_NOW" > "$_BRAIN_LAST_PULL_FILE"
@@ -322,6 +358,9 @@ elif [ -d "$_GH/.git" ] && [ "$_BRAIN_SYNC_MODE" != "off" ]; then
   [ -f "$_GH/.brain-last-push" ] && _BRAIN_LAST_PUSH=$(head -1 "$_GH/.brain-last-push" 2>/dev/null | tr -cd 'A-Za-z0-9._:+-' || echo never)
   _BRAIN_LAST_PUSH=${_BRAIN_LAST_PUSH:-never}
   echo "ARTIFACTS_SYNC: mode=$_BRAIN_SYNC_MODE | last_push=$_BRAIN_LAST_PUSH | queue=$_BRAIN_QUEUE_DEPTH"
+  # A stuck sync (scanner hold, failed push or commit, no push or no drain for
+  # 24 hours) prints fixed attention lines; a healthy sync prints none.
+  "$_BRAIN_SYNC_BIN" --attention 2>/dev/null | grep '^ARTIFACTS_SYNC: attention: ' || true
 else
   echo "ARTIFACTS_SYNC: off"
 fi
@@ -465,7 +504,7 @@ If A: append this section to the end of CLAUDE.md, then commit it (`git add CLAU
 
 ## Skill routing
 
-When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
+When the user's request matches an available skill, invoke it via the Skill tool. Route only to skills in the session's available-skills list; answer directly for quick questions or small scoped edits.
 
 Key routing rules:
 - Product ideas/brainstorming → invoke /office-hours
@@ -509,7 +548,7 @@ fi # end interactive-onboarding guard (kind != spawned)
 # actually says "auto-choose".
 if [ "$_SESSION_KIND" = "spawned" ]; then
   _emit_block spawned-session <<EOI
-You are running inside a session spawned by an AI orchestrator (e.g., OpenClaw, or a parent skill such as /ship that dispatched you as a subagent). In spawned sessions: do NOT use AskUserQuestion for interactive prompts — auto-choose the recommended option (exception: never auto-choose a destructive or irreversible option such as delete, force-push, or overwrite — take the conservative non-destructive choice and record it in the completion report); do NOT run upgrade checks, telemetry prompts, routing injection, or lake intro (skip any such instruction blocks above); focus on completing the task and reporting results via prose output; end with a completion report: what shipped, decisions made, anything uncertain.
+You are running inside a session spawned by an AI orchestrator (e.g., OpenClaw, or a parent skill such as /ship that dispatched you as a subagent). In spawned sessions: do NOT use AskUserQuestion for interactive prompts — auto-choose the recommended option (exception: never auto-choose a destructive or irreversible option such as delete, force-push, or overwrite, and never grant a consent or choose an option that publishes or syncs data off this machine — take the conservative non-destructive (local) choice and record it in the completion report); do NOT run upgrade checks, telemetry prompts, routing injection, or lake intro (skip any such instruction blocks above); focus on completing the task and reporting results via prose output; end with a completion report: what shipped, decisions made, anything uncertain.
 EOI
 fi
 

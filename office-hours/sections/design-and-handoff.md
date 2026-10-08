@@ -5,21 +5,23 @@
 Write the design document to the project directory.
 
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" && mkdir -p ~/.gstack/projects/$SLUG
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null) && mkdir -p "$GSTACK_STATE_ROOT/projects/$SLUG" && echo "PROJECT_DIR: $GSTACK_STATE_ROOT/projects/$SLUG"
 USER=$(whoami)
 DATETIME=$(date +%Y%m%d-%H%M%S)
 ```
 
 **Design lineage:** Before writing, check for existing design docs on this branch:
 ```bash
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
 setopt +o nomatch 2>/dev/null || true  # zsh compat
-PRIOR=$(ls -t ~/.gstack/projects/$SLUG/*-$BRANCH-design-*.md 2>/dev/null | head -1)
+PRIOR=$(ls -t "$GSTACK_STATE_ROOT"/projects/$SLUG/*-$BRANCH-design-*.md 2>/dev/null | head -1)
 ```
 If `$PRIOR` exists, the new doc gets a `Supersedes:` field referencing it. This creates a revision chain — you can trace how a design evolved across office hours sessions.
 
-Write to `~/.gstack/projects/{slug}/{user}-{branch}-design-{datetime}.md`.
+Write to `<PROJECT_DIR>/{user}-{branch}-design-{datetime}.md` (`PROJECT_DIR` printed by the setup block above).
 
-**Repo copy (dual-write, #703 + #2000).** When the session runs inside a git
+**Repo copy (dual-write).** When the session runs inside a git
 repository, ALSO write the doc to `docs/designs/{topic-slug}.md` in the repo —
 visible, committable, team-shareable. The `~/.gstack` copy is still written
 (memory ingest and cross-session discovery depend on it); the repo copy is
@@ -36,7 +38,7 @@ what teammates and plan reviews read. Rules:
 3. **Name the repo path** in the handoff line and any approval questions when
    the repo copy exists — that's the copy the user can open and commit.
 
-**Decision-record concision (#2000).** The doc is a decision record, not a
+**Decision-record concision.** The doc is a decision record, not a
 transcript: one bullet per decision with its why; an approach the user ruled
 out DURING the session gets one line (name + rejection reason), never a
 resurrected full section that re-argues the case; omit template sections that
@@ -187,37 +189,55 @@ all preceding valid round files in order (omit them for round 1):
 ~/.claude/skills/gstack/bin/gstack-office-hours-review prepare --design "<design-path>" --out-dir "<review-directory>" "<round-1.json if present>" "<round-2.json if present>"
 ```
 
-Omit absent arguments rather than passing placeholders. The helper chooses the next
+Omit absent arguments rather than passing placeholders. Users get 3 rounds; only
+when a caller sets a lower review round limit, add `--max-rounds <N>` with that
+same value to every prepare, check, and finalize command. The helper chooses the next
 round and writes `round-N.prompt.md`. It includes the full finding schema, all five
 review dimensions (Completeness, Consistency, Clarity, Scope, Feasibility), the
-office-hours coaching contract, and the COMPLETE preceding JSON verdict.
+office-hours coaching contract, and the COMPLETE preceding JSON verdict. It also
+saves the design as reviewed (`round-N.design.md`). Round 1 is a full review;
+rounds 2 and 3 are delta re-reviews of the exact design diff since the last round,
+so prepare every round in the same review directory and do not edit the design
+between prepare and its review.
 
-Use the Agent tool with `run_in_background: false` and its returned `dispatch`
-string unchanged as the prompt. The reviewer must Read the entire prepared prompt
+Use the Agent tool with `run_in_background: false` when available and its returned `dispatch`
+string unchanged as the prompt. A launch receipt means it went background: await its completion notice. The reviewer must Read the entire prepared prompt
 file before reviewing the design. Do not recreate the prompt, copy selected fields,
 or summarize prior findings. A parent Read does not deliver the file to the reviewer.
 The reviewer has fresh context and cannot see the brainstorming conversation.
-Its prepared contract requires a complete JSON Write and an identical JSON response.
+Its prepared contract requires a complete JSON Write, sealed by the dispatch's
+`Seal:` command, and a one-line `OFFICE_HOURS_VERDICT` receipt as its entire response.
 It protects the required coaching and Assignment sections, distinguishes unknown
 customer facts from committed behavior, and requires evidence for every prior status.
 
 **Step 2: Check stop conditions, then fix and re-dispatch**
 
 After each verdict, BEFORE fixing any findings or dispatching again, validate the
-saved files with the helper (list every completed round in order):
+saved files with the helper. Pass the reviewer's entire response unchanged as the
+receipt (a lone `OFFICE_HOURS_VERDICT` line; with a quote, backtick, `$` or `\` it is
+malformed) and list every completed round in order:
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-office-hours-review check "<round-1.json>" "<round-2.json if present>" "<round-3.json if present>"
+~/.claude/skills/gstack/bin/gstack-office-hours-review check --receipt "<receipt line>" "<round-1.json>" "<round-2.json if present>" "<round-3.json if present>"
 ```
 
+A missing, malformed, or mismatched receipt fails the check: that attempt is a failed review.
+
 Omit absent arguments rather than passing placeholders.
-**Convergence guard and stopping rules:** Read its stop reason:
-- PASS: no unresolved findings; proceed to Step 3.
-- CONVERGENCE: the reviewer explicitly marked a prior obligation persisting with
-  a concrete prior/current finding pair and document evidence. Stop even if new
-  findings appear. Shared topic labels or new refinements alone are insufficient.
-- MAX_ITERATIONS: round 3 completed; stop.
-- CONTINUE: fix the listed findings in the design, then return to Step 1 to prepare and dispatch the next review.
+**Convergence guard and stopping rules:** Each finding is blocking or minor. Only
+blocking findings require another round. Read its stop reason:
+- PASS: no blocking findings remain. Any minor findings are recorded, not fixed,
+  and never justify another round; proceed to Step 3.
+- CONVERGENCE: the reviewer explicitly marked a blocking prior obligation
+  persisting with a concrete prior/current finding pair and document evidence.
+  Stop even if new findings appear. Shared topic labels or new refinements alone
+  are insufficient.
+- MAX_ITERATIONS: round 3 completed (or the caller's lower round limit); stop.
+- CONTINUE: fix only the blocking findings in the design, then return to Step 1
+  to prepare and dispatch the next review. Do not edit for minor findings
+  mid-loop: they stay recorded for the user, and new text only gives the next
+  diff more to review. Its reviewer checks every prior finding and raises new
+  blocking findings only for problems your changes introduced or exposed.
 
 On a stop, do not fix again or re-dispatch. Run the finalizer before approval:
 
@@ -254,11 +274,12 @@ inventing duplicate counts. Preserve the Assignment, coaching, approval, and Han
 Append the helper's actual metrics to the existing analytics log (telemetry is
 best-effort and must not block approval):
 ```bash
-mkdir -p ~/.gstack/analytics
-echo '{"skill":"office-hours","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","iterations":ITERATIONS,"issues_found":FOUND,"issues_fixed":FIXED,"remaining":REMAINING,"quality_score":SCORE}' >> ~/.gstack/analytics/spec-review.jsonl 2>/dev/null || true
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+mkdir -p "$GSTACK_STATE_ROOT/analytics"
+echo '{"skill":"office-hours","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","iterations":ITERATIONS,"issues_found":FOUND,"issues_fixed":FIXED,"remaining":REMAINING,"quality_score":SCORE}' >> "$GSTACK_STATE_ROOT/analytics/spec-review.jsonl" 2>/dev/null || true
 ```
 Use iterations, issues_found, issues_fixed, remaining, and quality_score from the
-helper. FOUND counts finding observations across rounds; FIXED counts only
+helper; its remaining_blocking and remaining_minor split the remaining count. FOUND counts finding observations across rounds; FIXED counts only
 reviewer-confirmed resolutions. An unavailable score is null, never invented.
 
 ---
@@ -292,7 +313,7 @@ source_skill: office-hours
 After write, invalidate affected digests:
 
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" 2>/dev/null || true
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null) || true
   ~/.claude/skills/gstack/bin/gstack-brain-cache invalidate product --project "$SLUG" 2>/dev/null || true
   ~/.claude/skills/gstack/bin/gstack-brain-cache invalidate goals --project "$SLUG" 2>/dev/null || true
   ~/.claude/skills/gstack/bin/gstack-brain-cache invalidate competitive-intel --project "$SLUG" 2>/dev/null || true
@@ -306,7 +327,7 @@ This is non-blocking — the user doesn't wait. Next invocation benefits
 from the warm cache.
 
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" 2>/dev/null || true
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null) || true
 (~/.claude/skills/gstack/bin/gstack-brain-cache refresh --project "$SLUG" 2>/dev/null &) || true
 ```
 
@@ -446,11 +467,12 @@ Design trajectory with interpretation:
 "You started this as a side project. But you've named specific users, pushed back when challenged, and your designs keep getting sharper each time. I don't think this is a side project anymore. Have you thought about whether this could be a company?"
 This must feel earned, not broadcast. If the evidence doesn't support it, skip entirely.
 
-**Builder Journey Summary** (session 5+): Auto-generate `~/.gstack/builder-journey.md`
-with a narrative arc (not a data table). The arc tells the STORY of their journey in
-second person, referencing specific things they said across sessions. Then open it:
+**Builder Journey Summary** (session 5+): Auto-generate `builder-journey.md` in the
+gstack state root (`$GSTACK_STATE_ROOT`, resolved by the block below) with a narrative
+arc (not a data table). The arc tells the STORY of their journey in second person,
+referencing specific things they said across sessions. Then open it:
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-paths)"
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
 open "$GSTACK_STATE_ROOT/builder-journey.md"
 ```
 
@@ -466,7 +488,7 @@ The data speaks. No pitch needed.
 
 Full accumulated signal summary from the profile.
 
-Auto-generate updated `~/.gstack/builder-journey.md` with narrative arc. Open it.
+Auto-generate updated `$GSTACK_STATE_ROOT/builder-journey.md` with narrative arc (resolve the state root and open it as in the regular tier).
 
 Then proceed to Founder Resources below.
 
@@ -474,7 +496,7 @@ Then proceed to Founder Resources below.
 
 ### Founder Resources (all tiers)
 
-**Standing opt-out check (#538) — run FIRST:**
+**Standing opt-out check — run FIRST:**
 
 ```bash
 ~/.claude/skills/gstack/bin/gstack-config get founder_resources 2>/dev/null || echo "true"
@@ -576,14 +598,15 @@ PAUL GRAHAM ESSAYS:
 1. Log the selected resource URLs to the builder profile (single source of truth).
 Append a resource-tracking entry:
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null || true)"
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null) || true
 ~/.claude/skills/gstack/bin/gstack-developer-profile --log-session '{"date":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","mode":"resources","project_slug":"'"${SLUG:-unknown}"'","signal_count":0,"signals":[],"design_doc":"","assignment":"","resources_shown":["URL1","URL2","URL3"],"topics":[]}' 2>/dev/null || true
 ```
 
 2. Log the selection to analytics:
 ```bash
-mkdir -p ~/.gstack/analytics
-echo '{"skill":"office-hours","event":"resources_shown","count":NUM_RESOURCES,"categories":"CAT1,CAT2","ts":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' >> ~/.gstack/analytics/skill-usage.jsonl 2>/dev/null || true
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+mkdir -p "$GSTACK_STATE_ROOT"/analytics
+echo '{"skill":"office-hours","event":"resources_shown","count":NUM_RESOURCES,"categories":"CAT1,CAT2","ts":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' >> "$GSTACK_STATE_ROOT"/analytics/skill-usage.jsonl 2>/dev/null || true
 ```
 
 3. Use AskUserQuestion to offer opening the resources:
@@ -641,13 +664,14 @@ D) Not now — I'll run a review later
 Net: 15 minutes of structured review now against rework risk later.
 
 On the user's SELECTION of A/B/C (not on invocation success), log the handoff, then invoke
-the chosen skill via the **Skill tool** (it auto-discovers the design doc):
+the chosen skill via the **Skill tool** (it auto-discovers the design doc). In both log
+commands, replace `SESSION_ID` with the value the skill-start output echoed:
 ```bash
-~/.claude/skills/gstack/bin/gstack-telemetry-log --event-type handoff --skill office-hours --outcome accepted --session-id "$_SESSION_ID" 2>/dev/null || true
+~/.claude/skills/gstack/bin/gstack-telemetry-log --event-type handoff --skill office-hours --outcome accepted --session-id "SESSION_ID" 2>/dev/null || true
 ```
 On D, log declined and stop:
 ```bash
-~/.claude/skills/gstack/bin/gstack-telemetry-log --event-type handoff --skill office-hours --outcome declined --session-id "$_SESSION_ID" 2>/dev/null || true
+~/.claude/skills/gstack/bin/gstack-telemetry-log --event-type handoff --skill office-hours --outcome declined --session-id "SESSION_ID" 2>/dev/null || true
 ```
 
 The design doc at `~/.gstack/projects/` is automatically discoverable by downstream skills — they will read it during their pre-review system audit.

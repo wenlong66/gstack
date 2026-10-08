@@ -101,13 +101,13 @@ context. Base the diagram on that read.
    - Every call to another function (trace into it — does IT have untested branches?)
    - Every edge: what happens with null input? Empty array? Invalid type?
 
-This is the critical step — you're building a map of every line of code that can execute differently based on input. Every branch in this diagram needs a test.
+This is the critical step — you're building a map of every line of code that can execute differently based on input. Every branch in this diagram needs coverage that would catch a real regression; the test value bar below decides whether that is a new test, an extension of an existing one, or already covered.
 
 **2. Map user flows, interactions, and error states:**
 
 Code coverage isn't enough — you need to cover how real users interact with the changed code. For each changed feature, think through:
 
-- **User flows:** What sequence of actions does a user take that touches this code? Map the full journey (e.g., "user clicks 'Pay' → form validates → API call → success/failure screen"). Each step in the journey needs a test.
+- **User flows:** What sequence of actions does a user take that touches this code? Map the full journey (e.g., "user clicks 'Pay' → form validates → API call → success/failure screen"). Each step in the journey needs coverage.
 - **Interaction edge cases:** What happens when the user does something unexpected?
   - Double-click/rapid resubmit
   - Navigate away mid-operation (back button, close tab, click another link)
@@ -146,7 +146,7 @@ Quality scoring rubric:
 
 A test that breaks under a behavior-preserving refactor asserts implementation: rewrite it at the owning boundary, unless exact output is the declared contract (goldens, prompt bytes, wire formats).
 
-Value card: `Value: protects=<...>; fails_when=<...>; why_new=<...>; seam=none` (seam: `none` or its name); each field at most 160 UTF-8 bytes here (clamp to 157 plus `...`; JSON keeps full values). Write it as a header comment in each generated test, next to the attribution (wrap, do not truncate); with no known comment syntax, put it in the PR body's Test value details. A missing upstream card never blocks: derive it; ignore unknown fields.
+Value card: `Value: protects=<...>; fails_when=<...>; why_new=<...>; seam=none` (seam: `none` or its name); each field at most 160 UTF-8 bytes here (clamp to 157 plus `...`; written JSON keeps full values). Write it as a header comment in each generated test, next to the attribution (wrap, do not truncate); with no known comment syntax, put it in the PR body's Test value details. A missing upstream card never blocks: derive it; ignore unknown fields.
 
 Example: Value: protects=refundPayment rejects an empty reason; fails_when=the reason guard is removed or inverted; why_new=billing.test.ts covers processPayment only; seam=none
 Rejected (covered_elsewhere): "checkout renders"; checkout.e2e.ts:15 covers it, so extend that test.
@@ -258,7 +258,7 @@ If test framework detected (or bootstrapped in Step 4):
 - Write the value card as a header comment in each generated or extended test.
 - Prioritize error handlers and edge cases first (happy paths are more likely already tested)
 - Read 2-3 existing test files to match conventions exactly
-- Generate unit tests. Mock all external dependencies (DB, API, Redis).
+- Generate the smallest native test for each path: unit tests for logic, mocking only services unrelated to the behavior under test (integration points where mocking hides real failures go to [→E2E]).
 - For paths marked [→E2E]: generate integration/E2E tests using the project's E2E framework (Playwright, Cypress, Capybara, etc.)
 - For paths marked [→EVAL]: generate eval tests using the project's eval framework, or flag for manual eval if none exists
 - Write tests that exercise the specific uncovered path with real assertions
@@ -288,12 +288,13 @@ Coverage line: `Test Coverage Audit: N new code paths. M covered (Y% any test, X
 After producing the coverage diagram, write a test plan artifact so `/qa` and `/qa-only` can consume it:
 
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" && mkdir -p ~/.gstack/projects/$SLUG
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null) && mkdir -p "$GSTACK_STATE_ROOT/projects/$SLUG" && echo "PROJECT_DIR: $GSTACK_STATE_ROOT/projects/$SLUG"
 USER=$(whoami)
 DATETIME=$(date +%Y%m%d-%H%M%S)
 ```
 
-Write to `~/.gstack/projects/{slug}/{user}-{branch}-ship-test-plan-{datetime}.md`:
+Write to `<PROJECT_DIR>/{user}-{branch}-ship-test-plan-{datetime}.md` (`PROJECT_DIR` printed above):
 
 ```markdown
 # Test Plan
@@ -335,15 +336,29 @@ After your analysis, output a single JSON object on the LAST LINE of your respon
    caller check is `needs_seam`). Move each failure to `tests_rejected` with its
    `reason_code`, then remove it before anything else reads the diff: an untracked new
    file is deleted; for a tracked file, revert only this run's hunk with Edit, never
-   the whole file.
+   the whole file. Write one rejected test path per line, relative to the repository
+   root, into a private file:
+
+```bash
+_GT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp"
+mkdir -p "$_GT" && chmod 700 "$_GT" || { echo "Not sent: cannot create $_GT for the text file." >&2; exit 1; }
+_EX=$(git rev-parse --git-path info/exclude 2>/dev/null) && mkdir -p "$(dirname "$_EX")" && { grep -qxF '/.gstack/tmp/' "$_EX" 2>/dev/null || echo '/.gstack/tmp/' >> "$_EX"; }
+REJECTED_FILE=$(mktemp "${_GT:?}/rejected-tests.XXXXXX") || { echo "Not sent: mktemp failed in $_GT." >&2; exit 1; }; echo "REJECTED_FILE: $REJECTED_FILE (name: ${REJECTED_FILE##*/})"
+```
+
+Write the text into each printed file with your file-write tool (Claude Code's Write tool needs a Read of the empty file first), exactly as it should appear. The text never goes into a shell command, heredoc or quoted argument. If a write fails or is refused, do not send: print the cause, the file path and the command below for sending by hand.
+
+   Then run, substituting the printed name for `<rejected-file-name>`:
 
    ```bash
+   REJECTED_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<rejected-file-name>"
+   [ -s "$REJECTED_FILE" ] || { echo "Nothing removed: $REJECTED_FILE is empty; write the paths, then rerun." >&2; exit 1; }
    while IFS= read -r f; do
      [ -n "$f" ] || continue
+     case "$f" in /*|..|../*|*/..|*/../*) echo "SKIPPED (outside repo): $f"; continue ;; esac
      if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then echo "REVERT_HUNK: $f"; else rm -f -- "$f" && echo "REMOVED: $f"; fi
-   done <<'REJECTED'
-   <one rejected test path per line>
-   REJECTED
+   done < "$REJECTED_FILE"
+   rm -f "$REJECTED_FILE"
    ```
 
    No `tests_rejected` path may remain on disk as a new file. If every test written in

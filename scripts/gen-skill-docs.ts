@@ -21,12 +21,15 @@ import * as path from 'path';
 import type { Host, TemplateContext } from './resolvers/types';
 import { HOST_PATHS } from './resolvers/types';
 import { RESOLVERS } from './resolvers/index';
-import { usesLazySections } from './resolvers/sections';
+import { rewriteCarvedSectionRefs, SKILL_BYTE_CEILING, usesLazySections } from './resolvers/sections';
+import { insertRuntimePreludes } from './resolvers/runtime-root';
 import { ALL_HOST_NAMES, resolveHostArg, getHostConfig } from '../hosts/index';
 import type { HostConfig } from './host-config';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 import { ALL_MODEL_NAMES, resolveModel, type Model } from './models';
+import { resolveStateRoot } from '../lib/state-root';
+import { mkdirpSync } from '../lib/fs-utils';
 
 type HostArg = Host | 'all';
 
@@ -37,6 +40,10 @@ export interface GenerationOptions {
   dryRun?: boolean;
   outputRoot?: string;
   contentLinkRoot?: string | null;
+  /** Install-context render contract: absolute install root this render serves. */
+  installRoot?: string | null;
+  /** Skills this install leaves unregistered (gstack-config disabled_skills); the router omits them. */
+  disabledSkills?: string[];
   model?: Model | null;
   catalogMode?: 'trim' | 'full';
   explainLevel?: 'default' | 'terse';
@@ -47,6 +54,8 @@ export interface GenerationOptions {
 interface RenderOptions {
   outputRoot: string;
   contentLinkRoot: string | null;
+  installRoot: string | null;
+  disabledSkills: string[];
   model: Model | null;
   catalogMode: 'trim' | 'full';
   explainLevel: 'default' | 'terse';
@@ -75,11 +84,11 @@ export interface GenerationResult {
 /** Canonical generation never reads local detection state unless opted in. */
 function loadGbrainOverride(respectDetection: boolean): boolean {
   if (!respectDetection) return false;
-  const stateDir = process.env.GSTACK_HOME || path.join(process.env.HOME || '', '.gstack');
+  const stateDir = resolveStateRoot();
   try {
     const json = JSON.parse(fs.readFileSync(path.join(stateDir, 'gbrain-detection.json'), 'utf-8'));
-    // Slow, remote, and locked engines are still usable (#1964/#2051/#2456).
-    return ['ok', 'timeout', 'thin-client', 'engine-locked'].includes(json.gbrain_local_status ?? '');
+    // Slow, remote, locked and briefly unreachable engines are still usable (#1964/#2051/#2456, A2).
+    return ['ok', 'timeout', 'db-unreachable', 'thin-client', 'engine-locked'].includes(json.gbrain_local_status ?? '');
   } catch {
     return false;
   }
@@ -120,6 +129,14 @@ function parseGenerationArgs(args: string[]): GenerationOptions {
   }
   const outDir = value('--out-dir');
   const linkRoot = value('--link-root');
+  const disabledValue = value('--disabled-skills');
+  const disabledSkills = (disabledValue ?? '').split(/[\s,]+/).filter(Boolean);
+  const badDisabled = disabledSkills.find(n => !/^\/?[a-z0-9-]+$/.test(n));
+  if (badDisabled) throw new Error(`--disabled-skills takes skill names (got ${JSON.stringify(badDisabled)})`);
+  const installRoot = value('--install-root');
+  if (installRoot !== undefined && !INSTALL_ROOT_PATTERN.test(installRoot)) {
+    throw new Error(`--install-root must be an absolute path of letters, digits and . _ - + @ / (got ${JSON.stringify(installRoot)})`);
+  }
   // Swap-in callers use --link-root for the FINAL serving path (#2692).
   // Direct --out-dir callers retain their existing links into the render.
   return {
@@ -129,7 +146,47 @@ function parseGenerationArgs(args: string[]): GenerationOptions {
     outputRoot: outDir === undefined ? ROOT : path.resolve(outDir),
     contentLinkRoot: linkRoot !== undefined ? path.resolve(linkRoot)
       : outDir !== undefined ? path.resolve(outDir) : null,
+    installRoot: installRoot ?? null,
+    disabledSkills,
   };
+}
+
+/** Install roots are spliced into shell lines unquoted, so only plain absolute paths. */
+const INSTALL_ROOT_PATTERN = /^\/[A-Za-z0-9_.@+\/-]*$/;
+
+/**
+ * Install-context render contract (docs/ADDING_A_HOST.md): a per-install render
+ * names its own install root instead of the host's default global root. Null
+ * keeps the committed bytes.
+ */
+function rewriteInstallRoot(content: string, hostConfig: HostConfig, installRoot: string | null): string {
+  if (!installRoot) return content;
+  const root = installRoot.replace(/\/+$/, '');
+  const defaults = hostConfig.usesEnvVars
+    ? [`$HOME/${hostConfig.globalRoot}`, `~/${hostConfig.globalRoot}`]
+    : ['$HOME/.claude/skills/gstack', '~/.claude/skills/gstack'];
+  return defaults.reduce((text, from) => text.split(from).join(root), content);
+}
+
+/**
+ * C8 (#3018): the router names every skill, so it routed to skills the user
+ * disabled (it also said "When in doubt, invoke the skill" until v1.91.31). A per-install render that
+ * knows its disabled skills drops their routing rules (keeping the other side
+ * of an "A or B" rule) and says which skills are off. The router itself and
+ * the way back (gstack-upgrade) can never be disabled.
+ */
+function omitDisabledSkills(content: string, disabled: string[]): string {
+  const off = new Set(disabled.map(n => n.replace(/^\//, '')).filter(n => n !== 'gstack' && n !== 'gstack-upgrade').map(n => n.replace(/^gstack-/, '')));
+  if (off.size === 0) return content;
+  const isOff = (ref: string) => off.has(ref.replace(/^`\/(?:gstack-)?|`$/g, ''));
+  const routed = content.split('\n').flatMap(line => {
+    const m = line.match(/^(- .*→ invoke )(`\/[a-z0-9-]+`(?: or `\/[a-z0-9-]+`)*)(.*)$/);
+    if (!m) return [line];
+    const kept = m[2].split(' or ').filter(ref => !isOff(ref));
+    return kept.length ? [`${m[1]}${kept.join(' or ')}${m[3]}`] : [];
+  }).join('\n');
+  const names = [...off].map(n => `\`/${n}\``).join(', ');
+  return routed.replace('\n## Route first\n', `\n## Route first\n\nDisabled on this install (never invoke or suggest them): ${names}.\n`);
 }
 
 /** Repoint only Claude section links, retaining global bin/browse/doc paths. */
@@ -472,7 +529,8 @@ function transformFrontmatter(content: string, host: Host): string {
 
   // Build frontmatter with allowed fields
   const indentedDesc = description.split('\n').map(l => `  ${l}`).join('\n');
-  let newFm = `---\nname: ${name}\ndescription: |\n${indentedDesc}\n`;
+  const fmName = fm.nameMatchesDirectory && name !== 'gstack' && !name.startsWith('gstack-') ? `gstack-${name}` : name;
+  let newFm = `---\nname: ${fmName}\ndescription: |\n${indentedDesc}\n`;
 
   // Add extra fields (host-wide)
   if (fm.extraFields) {
@@ -527,8 +585,9 @@ function transformFrontmatter(content: string, host: Host): string {
  * Extract hook descriptions from frontmatter for inline safety prose.
  * Returns a description of what the hooks do, or null if no hooks.
  */
-function extractHookSafetyProse(tmplContent: string): string | null {
+function extractHookSafetyProse(tmplContent: string, hostConfig: HostConfig): string | null {
   if (!tmplContent.match(/^hooks:/m)) return null;
+  if (hostConfig.capabilities.safetyHooks === 'enforced') return null;
 
   // Parse the hook matchers to build a human-readable safety description
   const matchers: string[] = [];
@@ -551,7 +610,7 @@ function extractHookSafetyProse(tmplContent: string): string | null {
     .map(t => toolDescriptions[t] || `check ${t} operations for safety`)
     .join(', and ');
 
-  return `> **Safety Advisory:** This skill includes safety checks that ${safetyChecks}. When using this skill, always pause and verify before executing potentially destructive operations. If uncertain about a command's safety, ask the user for confirmation before proceeding.`;
+  return `> **Safety Advisory — not enforced on ${hostConfig.displayName}:** advisory, not blocked. ${hostConfig.displayName} runs no gstack safety hooks, so nothing stops a command automatically. On Claude Code this skill's hooks ${safetyChecks}; here, do those checks yourself: always pause and verify before executing potentially destructive operations. If uncertain about a command's safety, ask the user for confirmation before proceeding.`;
 }
 
 // ─── External Host Config (now derived from hosts/*.ts) ──────
@@ -673,7 +732,7 @@ function buildContext(
   const interactive = interactiveMatch ? interactiveMatch[1] === 'true' : undefined;
   return {
     skillName, tmplPath, benefitsFrom, host, paths: HOST_PATHS[host],
-    preambleTier, model: options.model ?? getHostConfig(host).defaultModel, interactive, explainLevel: options.explainLevel,
+    preambleTier, model: options.model ?? getHostConfig(host).defaultModel, interactive, explainLevel: options.explainLevel, installRoot: options.installRoot,
   };
 }
 
@@ -712,7 +771,7 @@ function processExternalHost(
   }
 
   // Extract hook safety prose BEFORE transforming frontmatter (which strips hooks)
-  const safetyProse = extractHookSafetyProse(tmplContent);
+  const safetyProse = extractHookSafetyProse(tmplContent, hostConfig);
 
   // Transform frontmatter (host-aware)
   let result = transformFrontmatter(content, host);
@@ -811,6 +870,8 @@ function processTemplate(tmplPath: string, host: Host, options: RenderOptions): 
 
   // --out-dir: repoint section-base paths to the out-dir (no-op otherwise).
   if (host === 'claude') content = rewriteSectionBase(content, options.contentLinkRoot);
+  if (skillDir === '' || skillDir === '.') content = omitDisabledSkills(content, options.disabledSkills);
+  content = rewriteInstallRoot(insertRuntimePreludes(rewriteCarvedSectionRefs(content, ctx), ctx), currentHostConfig, options.installRoot);
 
   return { outputPath, content, symlinkLoop, metadata };
 }
@@ -856,6 +917,7 @@ function processSectionTemplate(
     // repoint those to the out-dir too (no-op when --out-dir is unset).
     content = rewriteSectionBase(content, options.contentLinkRoot);
   }
+  content = rewriteInstallRoot(insertRuntimePreludes(rewriteCarvedSectionRefs(content, ctx), ctx), hostConfig, options.installRoot);
 
   // Plain generated header (no frontmatter to insert after).
   content = GENERATED_HEADER.replace('{{SOURCE}}', path.basename(sectionTmplPath)) + content;
@@ -888,6 +950,8 @@ export async function runGeneration(settings: GenerationOptions = {}): Promise<G
   const options: RenderOptions = {
     outputRoot: path.resolve(settings.outputRoot ?? ROOT),
     contentLinkRoot: settings.contentLinkRoot ?? null,
+    installRoot: settings.installRoot ?? null,
+    disabledSkills: settings.disabledSkills ?? [],
     model: settings.model ?? null,
     catalogMode: settings.catalogMode ?? 'trim',
     explainLevel: settings.explainLevel ?? 'default',
@@ -935,7 +999,7 @@ export async function runGeneration(settings: GenerationOptions = {}): Promise<G
           log(`FRESH: ${relativePath}`);
         }
       } else {
-        fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+        mkdirpSync(path.dirname(outputPath));
         fs.writeFileSync(outputPath, content);
         log(`GENERATED: ${relativePath}`);
       }
@@ -973,10 +1037,11 @@ export async function runGeneration(settings: GenerationOptions = {}): Promise<G
             (host === 'claude' ? '' : GENERATED_HEADER.replace('{{SOURCE}}', 'qa/templates/functional-report-template.md')) + report, 'asset', host);
         }
         tokenBudget.push({ skill: relativePath, lines: result.content.split('\n').length, tokens: Math.round(result.content.length / 4) });
-        const TOKEN_CEILING_BYTES = 160_000;
-        if (result.content.length > TOKEN_CEILING_BYTES) {
-          const message = `⚠️ TOKEN CEILING: ${relativePath} is ${result.content.length} bytes (~${Math.round(result.content.length / 4)} tokens), exceeds ${TOKEN_CEILING_BYTES} byte ceiling (~40K tokens)`;
-          diagnostics.push({ kind: 'warning', host, relativePath, message });
+        const bytes = Buffer.byteLength(result.content, 'utf8');
+        if (bytes > SKILL_BYTE_CEILING) {
+          // Setup renders per install (--install-root): an oversized skill must never leave a user with none.
+          const message = `${host}/${path.basename(path.dirname(result.outputPath))}/SKILL.md is ${bytes} bytes, over the ${SKILL_BYTE_CEILING.toLocaleString('en-US')}-byte limit. Fix: carve sections with usesLazySections() for this skill.`;
+          diagnostics.push({ kind: options.installRoot ? 'warning' : 'error', host, relativePath, message });
         }
       }
 
@@ -1087,7 +1152,7 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     }
     if (!settings.dryRun) {
       try {
-        const config = fs.readFileSync(path.join(process.env.HOME || '', '.gstack', 'config.yaml'), 'utf-8');
+        const config = fs.readFileSync(path.join(resolveStateRoot(), 'config.yaml'), 'utf-8');
         if (/^skill_prefix:\s*true/m.test(config)) {
           console.log('\nNote: skill_prefix is true. Run gstack-relink to re-apply name: patches (it patches both the install and any active gbrain render).');
         }

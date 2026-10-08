@@ -15,6 +15,7 @@ import {
   RETENTION_ONE_LINER, RETIREMENT_FIELDS, REVIEW_EVIDENCE_FIELDS, SWEEP_POINTER, TEST_VALUE_BAR_MAX_BYTES, TEST_VALUE_BAR_MODES,
   WEAK_REASONS, clampCardField, generateTestValueBar, renderValueCard, type TestValueBarMode,
 } from '../scripts/resolvers/test-value';
+import { recordsNonTestCallerSearch } from './helpers/test-value-fixture';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const FIX = 'Fix: bun run gen:skill-docs && bun test test/test-value-bar.test.ts';
@@ -61,7 +62,7 @@ const CONTRACT: Record<TestValueBarMode, { render: string; required: string[]; a
   },
   qa: {
     render: bar('qa'),
-    required: [QUESTIONS[2], QUESTIONS[3], CARD_FORMAT, 'Put it in the 8e.5 record (/qa) or under each proposed test (/qa-only).', 'A missing upstream card never blocks'],
+    required: [QUESTIONS[2], QUESTIONS[3], CARD_FORMAT, 'A missing upstream card never blocks'],
     absent: [QUESTIONS[0], QUESTIONS[1]],
   },
   audit: {
@@ -80,6 +81,20 @@ describe('test value bar render contract', () => {
     const rendered = bar(mode);
     expect(rendered.includes('Example: Value: protects=') && rendered.includes('Rejected (covered_elsewhere)'), `${mode} needs one good card and one rejected proposal`).toBe(true);
     expect(Buffer.byteLength(rendered, 'utf8')).toBeLessThanOrEqual(TEST_VALUE_BAR_MAX_BYTES[mode]);
+  });
+
+  test('the card clamp applies to card lines only; written JSON keeps full values (C2)', () => {
+    for (const mode of TEST_VALUE_BAR_MODES) {
+      expect(bar(mode)).toContain(`each field at most ${CARD_FIELD_MAX_BYTES} UTF-8 bytes here (clamp to 157 plus \`...\`; written JSON keeps full values)`);
+    }
+  });
+
+  test('qa mode names only the invoking skill\'s card location (/qa-only has no 8e.5 record)', () => {
+    const forSkill = (skillName: string) => generateTestValueBar({ ...ctx, skillName }, ['qa']);
+    expect(forSkill('qa')).toContain('Put it in the 8e.5 record.');
+    expect(forSkill('qa')).not.toContain('proposed test');
+    expect(forSkill('qa-only')).toContain('Put it under each proposed test.');
+    expect(forSkill('qa-only')).not.toContain('8e.5');
   });
 
   test('plan and ship coverage audits render the bar at their call site', () => {
@@ -134,9 +149,11 @@ describe('ship parent decision rules', () => {
   });
 
   test('the rejection step removes new rejected files and reports tracked ones for a hunk revert', () => {
-    const block = shipSection.slice(shipSection.indexOf('   while IFS= read -r f; do'), shipSection.indexOf('   REJECTED\n') + '   REJECTED\n'.length)
-      .split('\n').map(line => line.replace(/^ {3}/, '')).join('\n');
-    expect(block).toContain('<one rejected test path per line>');
+    const start = shipSection.indexOf('   REJECTED_FILE="$(git rev-parse');
+    const end = shipSection.indexOf('   rm -f "$REJECTED_FILE"\n', start) + '   rm -f "$REJECTED_FILE"\n'.length;
+    const block = shipSection.slice(start, end).split('\n').map(line => line.replace(/^ {3}/, '')).join('\n');
+    expect(block).toContain('<rejected-file-name>');
+    expect(block).toContain('done < "$REJECTED_FILE"');
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'test-value-rejected-'));
     try {
       const git = (...args: string[]) => spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 10_000 });
@@ -147,13 +164,18 @@ describe('ship parent decision rules', () => {
       git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'seed');
       fs.appendFileSync(path.join(dir, 'test/kept.test.ts'), 'test("dup", () => {});\n');
       fs.writeFileSync(path.join(dir, 'test/new dup.test.ts'), 'test("dup", () => {});\n');
-      const script = block.replace('<one rejected test path per line>', 'test/new dup.test.ts\ntest/kept.test.ts');
+      fs.mkdirSync(path.join(dir, '.gstack/tmp'), { recursive: true });
+      const list = path.join(dir, '.gstack/tmp/rejected-tests.abc123');
+      fs.writeFileSync(list, 'test/new dup.test.ts\ntest/kept.test.ts\n../outside.test.ts\n');
+      const script = block.replace('<rejected-file-name>', 'rejected-tests.abc123');
       const run = spawnSync('bash', ['-c', script], { cwd: dir, encoding: 'utf8', timeout: 10_000 });
       expect(run.status).toBe(0);
       expect(run.stdout).toContain('REMOVED: test/new dup.test.ts');
       expect(run.stdout).toContain('REVERT_HUNK: test/kept.test.ts');
+      expect(run.stdout).toContain('SKIPPED (outside repo): ../outside.test.ts');
       expect(fs.existsSync(path.join(dir, 'test/new dup.test.ts'))).toBe(false);
       expect(fs.existsSync(path.join(dir, 'test/kept.test.ts'))).toBe(true);
+      expect(fs.existsSync(list)).toBe(false);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -186,7 +208,7 @@ describe('template contracts', () => {
     expect(read('qa/SKILL.md.tmpl')).toContain('{{TEST_VALUE_BAR:qa}}');
     expect(read('qa-only/SKILL.md.tmpl')).toContain('{{TEST_VALUE_BAR:qa}}');
     expect(read('test-audit/SKILL.md.tmpl')).toContain('{{TEST_VALUE_BAR:audit}}');
-    for (const skill of ['qa', 'qa-only']) expect(read(`${skill}/SKILL.md`), `${skill} lacks the rendered bar. ${FIX}`).toContain(bar('qa'));
+    for (const skill of ['qa', 'qa-only']) expect(read(`${skill}/SKILL.md`), `${skill} lacks the rendered bar. ${FIX}`).toContain(generateTestValueBar({ ...ctx, skillName: skill }, ['qa']));
     expect(read('test-audit/SKILL.md')).toContain(bar('audit'));
     const templates = spawnSync('git', ['ls-files', '*.tmpl'], { cwd: ROOT, encoding: 'utf8', timeout: 10_000 }).stdout.split('\n').filter(Boolean);
     expect(templates.filter(file => read(file).includes('prefer too many to too few'))).toEqual([]);
@@ -239,3 +261,18 @@ describe('docs and registration', () => {
     expect(read('README.md').split('/deslop-shared-libs, /test-audit, /ship').length - 1).toBe(2);
   });
 });
+
+// Stored test-only-export evidence for the review test-value caller-search grader.
+{
+  const stored = JSON.parse(fs.readFileSync(path.join(import.meta.dir, 'fixtures/test-value-seam-evidence.json'), 'utf8')) as
+    { known_good: Record<string, unknown>; known_bad: Record<string, unknown> };
+
+  describe('test-only export caller-search evidence', () => {
+    test.each(Object.entries(stored.known_good))('accepts %s', (_name, evidence) => {
+      expect(recordsNonTestCallerSearch({ evidence })).toBe(true);
+    });
+    test.each(Object.entries(stored.known_bad))('rejects %s', (_name, evidence) => {
+      expect(recordsNonTestCallerSearch({ evidence })).toBe(false);
+    });
+  });
+}

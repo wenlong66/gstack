@@ -5,33 +5,43 @@ import type { AskUserQuestionFingerprint } from './claude-pty-runner';
 import type { PlanCountTranscript } from './plan-count-transcript';
 import { isDeepStrictEqual } from 'node:util';
 
+/**
+ * Minimum target AskUserQuestion calls for the five split-overflow candidates:
+ * five options at four per call need at least two calls. Batching compatible
+ * candidates is legitimate; every candidate still needs its own disposition.
+ */
+export const CEO_SPLIT_CALL_FLOOR = 2;
+
 const optionLabel = (label: string) => label.trim().replace(/^[A-D][).] /, '')
   .replace(/ \(recommended\)$/i, '');
 const platforms = ['Slack', 'Discord', '(?:Microsoft )?Teams', 'Telegram', 'Mattermost'];
 
+/** The skill names the split buckets Include, Defer, Cut and Hold; the leading verb is the action. */
 export function ceoSplitOptionAction(label: string): 'include' | 'defer' | 'cut' | 'hold' | null {
-  label = optionLabel(label);
-  if (/^Include(?: in (?:this|the) scope| this quarter| \(over cap\))?$/i.test(label)) return 'include';
-  if (/^Defer(?: to next quarter)?$/i.test(label)) return 'defer';
-  if (/^Cut(?: entirely)?$/i.test(label)) return 'cut';
-  return /^Hold$/i.test(label) ? 'hold' : null;
+  const verb = /^(Include|Defer|Cut|Hold)\b/i.exec(optionLabel(label))?.[1];
+  return verb ? verb.toLowerCase() as 'include' | 'defer' | 'cut' | 'hold' : null;
 }
 
 /** Candidate-shaped menus for live progress only. Final coverage, subject and
- * independence are established by evaluatePlanReviewDecisions over every call. */
+ * independence are established by evaluatePlanReviewDecisions over every call.
+ * The skill fixes no header or question wording, so identity is the one ledger
+ * token E1-E5 across the header and the question's first line (SCOPE-E1,
+ * E1-SLACK and "E1 Slack" all count). Neither may name another candidate's
+ * platform; a misspelled own platform is harmless because the E-id carries the
+ * identity. The menu offers exactly one include, defer and cut disposition. */
 export function ceoSplitCandidate(question: NativeQuestion): string | null {
-  const lead = question.question.split(/\r?\n/, 1)[0]!
-    .replace(/^D[1-9]\d*(?:\.[1-9]\d*)?\s*[—–:-]\s*/, '');
-  const target = /^E([1-5])[):]\s+(.+\?)$/.exec(lead);
-  if (!target || question.multiSelect || question.options.length < 3 || question.options.length > 4) return null;
-  const id = `E${target[1]}`;
-  const platform = platforms[Number(target[1]) - 1]!;
-  if (!new RegExp(`^${id}\\s+${platform}$`, 'i').test(question.header.trim()) ||
-      !new RegExp(`\\b${platform}\\b`, 'i').test(target[2]!) ||
-      /\bE[1-5][):]/.test(target[2]!)) return null;
+  if (question.multiSelect || question.options.length < 3 || question.options.length > 4) return null;
+  const header = question.header.trim();
+  const lead = question.question.split(/\r?\n/, 1)[0]!;
+  const ids = new Set([...`${header}\n${lead}`.matchAll(/\bE([1-9]\d*)\b/g)].map(match => Number(match[1])));
+  if (ids.size !== 1) return null;
+  const [id] = ids as Set<number>;
+  if (id! < 1 || id! > platforms.length) return null;
+  const names = (text: string, platform: string) => new RegExp(`\\b${platform}\\b`, 'i').test(text);
+  if (platforms.some((platform, i) => i !== id! - 1 && (names(header, platform) || names(lead, platform)))) return null;
   const actions = question.options.map(option => ceoSplitOptionAction(option.label));
-  return actions.every(Boolean) && new Set(actions).size === actions.length &&
-    ['include', 'defer', 'cut'].every(action => actions.includes(action)) ? id : null;
+  return ['include', 'defer', 'cut'].every(action => actions.filter(found => found === action).length === 1)
+    ? `E${id}` : null;
 }
 
 export function isCeoSplitCandidateCall(fp: AskUserQuestionFingerprint): boolean {

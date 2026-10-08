@@ -5,7 +5,8 @@ import { join, resolve, dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 
 const ROOT = resolve(import.meta.dir, '..');
-const template = readFileSync(join(ROOT, 'investigate/SKILL.md.tmpl'), 'utf8');
+// The Claude render: the template names the root as {{RUNTIME_ROOT}} ($HOME/.claude/skills/gstack on Claude).
+const template = readFileSync(join(ROOT, 'investigate/SKILL.md'), 'utf8');
 const scope = template.split('## Scope Lock')[1].split('\n---')[0];
 const acquisition = [...scope.matchAll(/```bash\n([\s\S]*?)```/g)][1][1];
 const registered = template.match(/command: '(.*check-freeze\.sh.*)'/)![1].replace(/''/g, "'");
@@ -50,7 +51,7 @@ beforeEach(() => {
   env = { ...process.env, HOME: join(root, 'home'), GSTACK_HOME: join(root, 'state'), CLAUDE_PLUGIN_DATA: '', CLAUDE_PLUGIN_ROOT: '' };
   mkdirSync(env.GSTACK_HOME!);
   state = join(env.GSTACK_HOME!, 'freeze-dir.txt');
-  for (const file of ['freeze/bin/check-freeze.sh', 'freeze/bin/freeze-state.sh', 'careful/bin/hook-extract.sh', 'bin/gstack-paths']) {
+  for (const file of ['freeze/bin/check-freeze.sh', 'freeze/bin/freeze-state.sh', 'careful/bin/hook-extract.sh', 'bin/gstack-paths', 'bin/gstack-state-root.sh']) {
     if (!existsSync(join(ROOT, file))) continue;
     const dest = join(env.HOME!, '.claude/skills/gstack', file);
     mkdirSync(dirname(dest), { recursive: true });

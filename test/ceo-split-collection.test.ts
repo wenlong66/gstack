@@ -2,10 +2,13 @@ import { expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { nativePlanCallFingerprint } from './helpers/claude-pty-runner';
+import { nativePlanCallFingerprint, type AskUserQuestionFingerprint } from './helpers/claude-pty-runner';
+import type { NativeQuestion } from './helpers/plan-skill-questions';
 import type { NativePlanQuestionCall, PlanCountTranscript } from './helpers/plan-count-transcript';
-import { ceoSplitCandidate, ceoSplitDecisionFingerprints, isCeoSplitCollectionComplete } from './helpers/ceo-split-question-policy';
+import { ceoSplitCandidate, ceoSplitDecisionFingerprints, isCeoSplitCandidateCall, isCeoSplitCollectionComplete } from './helpers/ceo-split-question-policy';
 import captured from './fixtures/ceo-split-collection-0bcd.json';
+import rowIds from './fixtures/ceo-split-collection-3638.json';
+import variants from './fixtures/ceo-split-wording-variants.json';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 function original() {
@@ -50,6 +53,44 @@ test.each([0, 1, 2, 3, 4, 5, 6])('the exact original %i-call prefix waits for th
   expect(accepts(state)).toBe(length === 6);
 });
 
+// Run 36385945043: the skill cited ledger row IDs ("D2.1 — R-E1: …") and offered
+// a fourth "Hold, discuss first" option. No candidate was recognized, so collection
+// never stopped and the attempt ran the whole review (1302s) after the E5 ACK.
+function rowIdCapture(): { transcript: PlanCountTranscript; fingerprints: AskUserQuestionFingerprint[] } {
+  const calls = structuredClone(rowIds.calls) as unknown as NativePlanQuestionCall[];
+  const transcript: PlanCountTranscript = { status: 'ready', calls, assistantMessages: [] };
+  const fingerprints = rowIds.fingerprints.map((fp, index) => ({ ...structuredClone(fp), nativeCall: calls[index]! }));
+  return { transcript, fingerprints };
+}
+const rowIdAccepts = (state: ReturnType<typeof rowIdCapture>) => isCeoSplitCollectionComplete(state.transcript, state.fingerprints);
+
+test('ledger row-ID candidate questions from run 36385945043 finish collection at the E5 ACK', () => {
+  const state = rowIdCapture();
+  expect(rowIds.provenance.originalOutcome).toBe('completion_summary');
+  expect(rowIds.provenance.originalReviewCount).toBe(0);
+  expect(state.transcript.calls.at(-1)!.answeredAt).toBe(rowIds.provenance.completeAt);
+  expect(state.transcript.calls.map(call => ceoSplitCandidate(call.questions[0] as NativeQuestion)))
+    .toEqual([null, 'E1', 'E2', 'E3', 'E4', 'E5']);
+  expect(state.fingerprints.map(isCeoSplitCandidateCall)).toEqual([false, true, true, true, true, true]);
+  for (let length = 0; length < 6; length++) {
+    const prefix = rowIdCapture();
+    prefix.transcript.calls.length = length; prefix.fingerprints.length = length;
+    expect(rowIdAccepts(prefix)).toBe(false);
+  }
+  expect(rowIdAccepts(state)).toBe(true);
+});
+
+test.each(['foreign_row', 'quoted_row', 'second_platform', 'held'])('row-ID collection rejects %s evidence', kind => {
+  const state = rowIdCapture(), call = state.transcript.calls.at(-1)!, question = call.questions[0]!;
+  const selected = call.answers![question.question]!;
+  if (kind === 'foreign_row') question.question = question.question.replace('R-E5:', 'R-E4:');
+  if (kind === 'quoted_row') question.question = 'Example from R-E4: ' + question.question;
+  if (kind === 'second_platform') question.question = question.question.replace('?', ' or the Slack bot?');
+  call.answers = { [question.question]: kind === 'held' ? question.options[3]!.label : selected };
+  state.fingerprints = fromCalls(state.transcript.calls).fingerprints;
+  expect(rowIdAccepts(state)).toBe(false);
+});
+
 test('four candidate calls with five independent tabs meet the original floor', () => {
   const state = grouped(4);
   expect(state.transcript.calls).toHaveLength(5); // Four candidate calls plus mode.
@@ -86,7 +127,7 @@ test.each(['pending', 'failed', 'missing_answer', 'custom_answer', 'hold', 'quot
     if (kind === 'missing_answer') call.answers = {};
     if (kind === 'custom_answer') call.answers = { [question.question]: 'Custom approval' };
     if (kind === 'hold') call.answers = { [question.question]: question.options[3]!.label };
-    if (kind === 'quoted') question.question = 'Example: ' + question.question;
+    if (kind === 'quoted') question.question = 'Example from E4: ' + question.question;
     if (kind === 'wrong_platform') question.header = 'E5 Slack';
     if (kind === 'bundled') question.question = question.question.replace('?', ' and E4: Telegram?');
     if (kind === 'missing_cut') question.options.splice(2, 1);
@@ -136,12 +177,12 @@ const state = JSON.parse(fs.readFileSync(${JSON.stringify(inputPath)}, 'utf8'));
 const facts = { runs: 0, evaluators: 0, judges: 0, directory: '', candidateCalls: 0, suppliedCalls: 0 };
 const save = () => fs.writeFileSync(${JSON.stringify(factsPath)}, JSON.stringify(facts));
 mock.module(${JSON.stringify(path.join(ROOT, 'test/helpers/e2e-gate.ts'))}, () => ({
-  describeE2ETier: tier => { expect(tier).toBe('periodic'); return describe; },
+  describeE2ETier: tier => { expect(tier).toBe('marathon'); return describe; },
 }));
 mock.module(${JSON.stringify(path.join(ROOT, 'test/helpers/plan-review-decisions.ts'))}, () => ({
   evaluatePlanReviewDecisions: async input => {
     facts.evaluators++; save();
-    expect(input.kind).toBe('scope'); expect(input.floor).toBe(4);
+    expect(input.kind).toBe('scope'); expect(input.floor).toBe(2);
     expect(input.ceiling).toBeUndefined(); expect(input.targets).toEqual(CEO_SCOPE_CANDIDATES);
     expect(input.deadlineAt - Date.now()).toBeGreaterThan(1_490_000);
     expect(input.deadlineAt - Date.now()).toBeLessThanOrEqual(1_500_000);
@@ -223,3 +264,36 @@ await import(${JSON.stringify(path.join(ROOT, 'test/skill-e2e-plan-ceo-split-ove
     } finally { fs.rmSync(temp, { recursive: true, force: true }); }
   }, 20_000,
 );
+
+test.each(variants.runs.map(run => [run.source, run]))('captured candidate wording completes collection at the fifth call: %s', (_source, run) => {
+  const calls = structuredClone(run.calls) as unknown as NativePlanQuestionCall[];
+  expect(calls.map(call => ceoSplitCandidate(call.questions[0] as NativeQuestion))).toEqual(['E1', 'E2', 'E3', 'E4', 'E5']);
+  const state = fromCalls(calls);
+  expect(state.fingerprints.map(isCeoSplitCandidateCall)).toEqual([true, true, true, true, true]);
+  expect(isCeoSplitCollectionComplete(state.transcript, state.fingerprints)).toBe(true);
+  const four = fromCalls(calls.slice(0, 4));
+  expect(isCeoSplitCollectionComplete(four.transcript, four.fingerprints)).toBe(false);
+});
+
+test('the replay covers all 31 measured runs, including every slow-path variant', () => {
+  expect(variants.runs).toHaveLength(31);
+  expect(variants.runs.filter(run => run.originalOutcome !== 'collection_complete')).toHaveLength(18);
+});
+
+test('identity is the one ledger token; another platform or a second token rejects', () => {
+  const base = structuredClone(variants.runs[0]!.calls[0]!.questions[0]!) as unknown as NativeQuestion;
+  const ask = (header: string, lead: string) => ({ ...base, header, question: lead });
+  for (const [header, lead] of [['E1 Slack', 'D1.1 — E1: Ship the Slack DM bot?'], ['E1 Slack', 'D1.1 — E1) Ship the Slack DM bot?'],
+    ['E1 Slack', 'D1.1 — E1 Slack DM bot for incident alerts: include, defer, or cut?'], ['E1 Slack', 'D1.1 — E1-SLACK: Ship it?'],
+    ['D1.1 Slack', 'D1.1 — SCOPE-E1: Include the Slack DM bot this quarter?'], ['D1.1 E1 Slack', 'D1.1 — E1-SLACK: Include it?'],
+    ['E5 Mattermst', 'D1.5 — E5-MATTERMOST: Include the plugin?'], ['E5 Mattermst', 'D1.5 — Include the plugin this quarter?']] as const) {
+    expect(ceoSplitCandidate(ask(header, lead))).toBe(header.includes('Matter') ? 'E5' : 'E1');
+  }
+  for (const [header, lead] of [['D1.1 Slack', 'D1.1 — Ship the Slack DM bot this quarter?'], ['E1 Slack', 'D1.1 — E1: ship Slack before Discord?'],
+    ['E1 Discord', 'D1.1 — E1: Ship the bot?'], ['E1 Slack', 'D1.1 — E1-SLACK: ship Slack with E2?'], ['E1 Slack', 'D1.1 — E2: Ship the bot?'],
+    ['E6 Zulip', 'D1.6 — E6: Ship the Zulip bot?']] as const) expect(ceoSplitCandidate(ask(header, lead))).toBeNull();
+  const relabeled = (labels: string[]) => ({ ...base, options: base.options.map((option, i) => ({ ...option, label: labels[i]! })) });
+  expect(ceoSplitCandidate(relabeled(["Include in this quarter's scope (recommended)", 'Defer with flip trigger', 'Cut entirely', 'Hold — discuss']))).toBe('E1');
+  expect(ceoSplitCandidate(relabeled(['Ship now', 'Defer', 'Cut', 'Hold']))).toBeNull();
+  expect(ceoSplitCandidate(relabeled(['Include', 'Included elsewhere', 'Cut', 'Hold']))).toBeNull();
+});

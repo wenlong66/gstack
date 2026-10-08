@@ -17,8 +17,11 @@ const scoped = (file: unknown, config: string, session: string) => {
   return rel.length === 2 && rel[0] !== '..' && rel[0] !== '.' && rel[1] === `${session}.jsonl`;
 };
 export function createFilePermissionRecorder(cwd: string, config: string, expected: string) {
-  const relative = path.relative(os.tmpdir(), expected);
-  if (!path.isAbsolute(expected) || !relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) return undefined;
+  const inside = (root: string) => {
+    const relative = path.relative(root, expected);
+    return !!relative && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
+  };
+  if (!path.isAbsolute(expected) || !(inside(os.tmpdir()) || inside(fs.realpathSync(os.tmpdir())))) return undefined;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-file-permission-'));
   const file = path.join(dir, 'state.json');
   const command = [process.execPath, import.meta.path, '--record', file, cwd, config, expected].map(quote).join(' ');
@@ -284,7 +287,11 @@ function currentCreatePreview(preview: string, r: any, config: string, cwd: stri
   if(event.name!=='Write'||`${event.sessionId}:${event.toolUseId}`!==r.pendingId||event.input?.file_path!==r.expected||
     Date.parse(event.timestamp)<startedAt||typeof event.input.content!=='string'||
     Buffer.byteLength(event.input.content)>MAX_WRITE_INPUT_BYTES) return false;
-  const source=event.input.content.split(/\r?\n/), rows=preview.split('\n');
+  // A crop can keep the pane's file row and rule above the preview while its
+  // "Create file" title scrolls away. That row must name the owned path.
+  const header=/^ {0,3}(?![1-9]\d*(?:[ \t]|\n))(\S[^\n]*)\n[╌─━]{3,}[ \t]*\n/.exec(preview);
+  if(header && path.resolve(cwd,header[1]!.trim())!==r.expected) return false;
+  const source=event.input.content.split(/\r?\n/), rows=preview.slice(header?.[0].length ?? 0).split('\n');
   const numbered:Array<{line:number;text:string}>=[];
   let leading='';
   for(const row of rows) {
@@ -339,21 +346,28 @@ function currentEditPreview(preview: string, r: any, config: string, cwd: string
     const firstLine = before.slice(0, at).split(/\r?\n/).length;
     const oldLast = firstLine + input.old_string.split(/\r?\n/).length - 1;
     const newLast = firstLine + input.new_string.split(/\r?\n/).length - 1;
-    const rows: Array<{line: number; kind: string; text: string; clipped?: boolean}> = [];
+    const rows: Array<{line: number; kind: string; text: string; clipped?: boolean; gutter?: number}> = [];
     let leading: {kind: string; text: string} | undefined;
     for (const line of preview.split('\n')) {
       if (!line.trim() || /^[╌─━]{3,}[ \t]*$/.test(line)) continue;
-      const numbered = /^ {0,3}([1-9]\d*) ([ +\-])(.*)$/.exec(line);
+      // A trimmed empty unchanged row keeps only its number.
+      const numbered = /^( {0,3}([1-9]\d*) )([ +\-])(.*)$/.exec(line) ?? /^( {0,3}([1-9]\d*))()[ \t]*$/.exec(line);
       if (numbered) {
+        const kind = numbered[3] || ' ';
         if (leading) {
           // A wrapped first row has no coordinate. The next same-kind numbered
           // row anchors its complete visible suffix to the preceding source line.
-          if (leading.kind !== numbered[2] || Number(numbered[1]) < 2) return false;
-          rows.push({line:Number(numbered[1])-1,...leading,clipped:true}); leading=undefined;
+          if (leading.kind !== kind || Number(numbered[2]) < 2) return false;
+          rows.push({line:Number(numbered[2])-1,...leading,clipped:true}); leading=undefined;
         }
-        rows.push({line:Number(numbered[1]),kind:numbered[2]!,text:numbered[3]!}); continue;
+        rows.push({line:Number(numbered[2]),kind,text:numbered[4] ?? '',gutter:numbered[1]!.length}); continue;
       }
-      const wrapped = /^ {4,5}([+\-])(.*)$/.exec(line), last = rows.at(-1);
+      const last = rows.at(-1);
+      // An unchanged row wraps under its own gutter with a blank marker column.
+      if (last?.kind === ' ' && last.gutter && line.startsWith(' '.repeat(last.gutter + 1))) {
+        last.text += line.slice(last.gutter + 1); continue;
+      }
+      const wrapped = /^ {4,5}([+\-])(.*)$/.exec(line);
       if (!wrapped) return false;
       if (!last) {
         if (leading && leading.kind !== wrapped[1]) return false;

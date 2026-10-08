@@ -18,7 +18,8 @@ import { writeSecureFile, mkdirSecure } from './file-permissions';
 import { resolveConfig, ensureStateDir, readVersionHash, isPairAgentEnabled, resolveChromiumProfile } from './config';
 import { parseProxyConfig, computeConfigHash, ProxyConfigError } from './proxy-config';
 import { redactProxyUrl } from './proxy-redact';
-import { spawnTerminalAgent } from './terminal-agent-control';
+import { spawnTerminalAgent, BUN_CHILD_FLAGS } from './terminal-agent-control';
+import { profileOwner, ensureProjectProfile, runProfilesCommand } from './chromium-profiles';
 // Zero side effects on import (documented invariant in token-registry.ts) —
 // safe to pull the shared pairing default into the CLI.
 import { DEFAULT_PAIR_SCOPES } from './token-registry';
@@ -84,8 +85,6 @@ export function resolveServerScript(
   );
 }
 
-const SERVER_SCRIPT = resolveServerScript();
-
 /**
  * On Windows, resolve the Node.js-compatible server bundle.
  * Falls back to null if not found (server will use Bun instead).
@@ -103,19 +102,82 @@ export function resolveNodeServerScript(
   // Compiled binary: browse/dist/browse → browse/dist/server-node.mjs
   if (execPath) {
     const adjacent = path.resolve(path.dirname(execPath), 'server-node.mjs');
-    if (fs.existsSync(adjacent)) return adjacent;
+    if (fs.existsSync(adjacent)) return reachesPlaywright(adjacent) ? adjacent : (sourceServerScript(execPath) ?? adjacent);
   }
 
   return null;
 }
 
-const NODE_SERVER_SCRIPT = IS_WINDOWS ? resolveNodeServerScript() : null;
+/** Node resolves the bundle's externals (playwright, …) by walking up from the bundle's directory. */
+function reachesPlaywright(script: string): boolean {
+  for (let dir = path.dirname(script); ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, 'node_modules', 'playwright', 'package.json'))) return true;
+    if (path.dirname(dir) === dir) return false;
+  }
+}
 
-// On Windows, hard-fail if server-node.mjs is missing — the Bun path is known broken.
-if (IS_WINDOWS && !NODE_SERVER_SCRIPT) {
-  throw new Error(
-    'server-node.mjs not found. Run `bun run build` to generate the Windows server bundle.'
-  );
+/**
+ * #3026: a host runtime root on Windows (~/.codex/skills/gstack, …) holds file
+ * copies of browse/dist and no node_modules, so its server-node.mjs cannot
+ * import playwright. setup records the source checkout in the root's
+ * .source-path; run that checkout's bundle, which sits beside node_modules.
+ * Refuses (throws) when the two builds differ.
+ */
+/**
+ * setup runs under Git Bash on Windows, so `.source-path` holds an MSYS path
+ * (`/d/a/gstack`). Node reads that as `\d\a\gstack` on the current drive,
+ * which does not exist, and the CLI fell back to the root's own bundle that
+ * cannot import playwright (windows-setup-e2e). Map the drive form to `D:/...`.
+ */
+export function nativeSourcePath(source: string, platform: NodeJS.Platform = process.platform): string {
+  const msys = platform === 'win32' ? /^\/([A-Za-z])(\/.*)?$/.exec(source) : null;
+  return msys ? `${msys[1]!.toUpperCase()}:${msys[2] ?? '/'}` : source;
+}
+
+function sourceServerScript(execPath: string): string | null {
+  const root = path.resolve(path.dirname(execPath), '..', '..');
+  let source: string;
+  try {
+    source = nativeSourcePath(fs.readFileSync(path.join(root, '.source-path'), 'utf8').trim());
+  } catch {
+    return null;
+  }
+  const script = path.join(source, 'browse', 'dist', 'server-node.mjs');
+  if (!path.isAbsolute(source) || !fs.existsSync(script) || !reachesPlaywright(script)) return null;
+  // The CLI here and the checkout's server must come from the same build
+  // (both write browse/dist/.version); a checkout rebuilt without refreshing
+  // this root would otherwise run a server its CLI does not match.
+  const cliVersion = readVersionHash(execPath);
+  const serverVersion = readVersionHash(script);
+  if (cliVersion && serverVersion && cliVersion !== serverVersion) {
+    throw new Error(
+      `this install's browse CLI (${root}, build ${cliVersion.slice(0, 12)}) and the gstack checkout's server bundle ` +
+      `(${source}, build ${serverVersion.slice(0, 12)}) are from different builds, so the server was not started. ` +
+      `Fix: cd "${source}" && ./setup (rebuilds and refreshes every runtime root). ${BROWSE_VERSION_SKEW_ANCHOR}`,
+    );
+  }
+  return script;
+}
+
+export const BROWSE_VERSION_SKEW_ANCHOR = 'https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#browse-runtime-version-skew';
+
+/**
+ * Which server to start, resolved only when a server is actually started
+ * (#2439). Windows runs the Node bundle and never needs server.ts, which a
+ * minimal runtime root does not ship; resolving server.ts at module load made
+ * every command, even --help, fail there.
+ */
+export function resolveServerLaunch(
+  platform: NodeJS.Platform = process.platform,
+  env: Record<string, string | undefined> = process.env,
+  metaDir: string = import.meta.dir,
+  execPath: string = process.execPath,
+): { runtime: 'node' | 'bun'; script: string } {
+  if (platform !== 'win32') return { runtime: 'bun', script: resolveServerScript(env, metaDir, execPath) };
+  // On Windows, hard-fail if server-node.mjs is missing — the Bun path is known broken.
+  const script = resolveNodeServerScript(metaDir, execPath);
+  if (!script) throw new Error('server-node.mjs not found. Run `bun run build` to generate the Windows server bundle.');
+  return { runtime: 'node', script };
 }
 
 interface ServerState {
@@ -130,7 +192,7 @@ interface ServerState {
   configHash?: string;
   /** Xvfb child PID for cleanup on disconnect. */
   xvfbPid?: number;
-  xvfbStartTime?: number;
+  xvfbStartTime?: string;
   xvfbDisplay?: string;
   /** Launched-Chromium identity for post-stop reaping (#2709). */
   chromiumPid?: number;
@@ -277,23 +339,21 @@ function cleanChromiumProfileLocks(profileDir: string = chromiumProfileDir()): v
   }
 }
 
-/** Kill an orphaned Chromium that still holds the profile's SingletonLock. The
- * lock symlink target is "hostname-PID"; killing that PID tears down its
- * renderer tree so the next launch starts clean. No-op when absent/stale. */
+/** Kill an orphaned Chromium that still holds the profile's SingletonLock so
+ * the next launch starts clean (#1781). Only a Chromium on this host that uses
+ * this profile and whose daemon is gone is killed; a profile held by a live
+ * process is never killed — browse stops and names the holder (D5, #2492). */
 async function killOrphanChromium(profileDir: string = chromiumProfileDir()): Promise<void> {
-  try {
-    const lockTarget = fs.readlinkSync(path.join(profileDir, 'SingletonLock')); // "hostname-12345"
-    const orphanPid = parseInt(lockTarget.split('-').pop() || '', 10);
-    if (orphanPid && isProcessAlive(orphanPid)) {
-      safeKill(orphanPid, 'SIGTERM');
-      await new Promise(r => setTimeout(r, 1000));
-      if (isProcessAlive(orphanPid)) {
-        safeKill(orphanPid, 'SIGKILL');
-        await new Promise(r => setTimeout(r, 500));
-      }
-    }
-  } catch (err: any) {
-    if (err?.code !== 'ENOENT' && err?.code !== 'EINVAL') throw err;
+  const owner = profileOwner(profileDir);
+  if (owner.state === 'free') return;
+  if (owner.state === 'live') {
+    throw new Error(`Headed Chromium profile ${profileDir} is ${owner.detail}. Close that browser first, or set CHROMIUM_PROFILE to a different directory.`);
+  }
+  safeKill(owner.pid, 'SIGTERM');
+  await new Promise(r => setTimeout(r, 1000));
+  if (isProcessAlive(owner.pid)) {
+    safeKill(owner.pid, 'SIGKILL');
+    await new Promise(r => setTimeout(r, 500));
   }
 }
 
@@ -423,6 +483,102 @@ export function buildRestartEnv(
   return env;
 }
 
+/**
+ * Build the env for the headed `$B connect` server. Used by the initial
+ * connect and by the opt-in supervisor's respawn, so a respawned server keeps
+ * the same port, watchdog setting, proxy and config hash. Pure + exported for tests.
+ */
+export function buildHeadedServerEnv(
+  globalFlags: Pick<GlobalFlags, 'proxyUrl' | 'configHash'>,
+): Record<string, string> {
+  return {
+    BROWSE_HEADED: '1',
+    // Use a well-known port so the Chrome extension auto-connects.
+    BROWSE_PORT: '34567',
+    // Disable parent-process watchdog: the user controls the headed browser
+    // window lifecycle. The CLI exits immediately after connect, so watching
+    // it would kill the server ~15s later. Cleanup happens via browser
+    // disconnect event or $B disconnect.
+    BROWSE_PARENT_PID: '0',
+    // Apply --proxy from this invocation if present. Without this,
+    // `browse --proxy <url> connect` would launch headed Chromium
+    // bypassing the SOCKS bridge entirely.
+    ...(globalFlags.proxyUrl ? { BROWSE_PROXY_URL: globalFlags.proxyUrl } : {}),
+    ...(globalFlags.configHash ? { BROWSE_CONFIG_HASH: globalFlags.configHash } : {}),
+  };
+}
+
+export const SUPERVISOR_GUARD_WINDOW_MS = 5 * 60_000;
+export const SUPERVISOR_GUARD_MAX = 5;
+
+export interface HeadedSupervisorDeps {
+  env: Record<string, string>;
+  tickMs: number;
+  backoffMs: number[];
+  daemonLog: string;
+  readState: () => { pid?: number } | null;
+  isProcessAlive: (pid: number) => boolean;
+  startServer: (env: Record<string, string>) => Promise<{ pid: number; port: number }>;
+  spawnTerminalAgent: (server: { pid: number; port: number }) => void;
+  sleep: (ms: number) => Promise<void>;
+  now: () => number;
+  isExiting: () => boolean;
+  log: (line: string) => void;
+  warn: (line: string) => void;
+  error: (line: string) => void;
+}
+
+/**
+ * The opt-in `$B connect --supervise` loop: poll the server PID every tick and
+ * respawn it with the connect env when it dies. Five respawns inside the
+ * rolling five-minute window give up. Returns 'stopped' when a signal asked it
+ * to exit and 'gave_up' when the crash-loop guard tripped.
+ */
+export async function runHeadedSupervisor(deps: HeadedSupervisorDeps): Promise<'stopped' | 'gave_up'> {
+  const respawns: number[] = [];
+  while (!deps.isExiting()) {
+    await deps.sleep(deps.tickMs);
+    if (deps.isExiting()) break;
+    const state = deps.readState();
+    if (state?.pid && deps.isProcessAlive(state.pid)) continue;
+    // Server died. Prune rolling window and check guard.
+    const now = deps.now();
+    while (respawns.length && now - respawns[0] > SUPERVISOR_GUARD_WINDOW_MS) {
+      respawns.shift();
+    }
+    if (respawns.length >= SUPERVISOR_GUARD_MAX) {
+      deps.error(
+        `[browse] Supervisor: ${SUPERVISOR_GUARD_MAX} server crashes in ${SUPERVISOR_GUARD_WINDOW_MS / 1000}s, giving up. ` +
+          `Crash reasons: ${deps.daemonLog}. Relaunch: $B connect --supervise`,
+      );
+      return 'gave_up';
+    }
+    const attempt = respawns.length;
+    respawns.push(now);
+    const backoff = deps.backoffMs[Math.min(attempt, deps.backoffMs.length - 1)] ?? 30_000;
+    deps.warn(`[browse] Supervisor: server PID gone — respawning in ${backoff}ms (attempt ${attempt + 1}/${SUPERVISOR_GUARD_MAX})...`);
+    await deps.sleep(backoff);
+    if (deps.isExiting()) break;
+    let respawned: { pid: number; port: number };
+    try {
+      respawned = await deps.startServer(deps.env);
+    } catch (err: any) {
+      // Let the next tick try again — the crash-loop guard already
+      // bounded the retries via the rolling window.
+      deps.error(`[browse] Supervisor: server respawn failed: ${err?.message || err}. Daemon log: ${deps.daemonLog}`);
+      continue;
+    }
+    deps.log(`[browse] Supervisor: server respawned (PID ${respawned.pid}, port ${respawned.port}).`);
+    // Re-spawn the terminal-agent too; same env wiring as the initial connect.
+    try {
+      deps.spawnTerminalAgent(respawned);
+    } catch (err: any) {
+      deps.warn(`[browse] Supervisor: terminal-agent respawn failed: ${err?.message || err}`);
+    }
+  }
+  return 'stopped';
+}
+
 /** macOS only: pull the headed Chromium window to the user's current Space.
  * "Google Chrome for Testing" frequently opens behind the active window or on
  * another Space — the first thing users read as "I can't see the browser"
@@ -495,6 +651,7 @@ function openDaemonLogSink(): number | 'ignore' {
 }
 
 async function startServer(extraEnv?: Record<string, string>): Promise<ServerState> {
+  const server = resolveServerLaunch();
   ensureStateDir(config);
 
   // Bound the append-mode daemon log before the new daemon starts writing.
@@ -516,6 +673,7 @@ async function startServer(extraEnv?: Record<string, string>): Promise<ServerSta
   // blocked by the previous Chromium's SingletonLock — the self-inflicted
   // crash-loop. Previously only the manual connect preamble did this.
   if ((extraEnv?.BROWSE_HEADED ?? process.env.BROWSE_HEADED) === '1') {
+    ensureProjectProfile(chromiumProfileDir());
     await killOrphanChromium();
     cleanChromiumProfileLocks();
   }
@@ -529,7 +687,7 @@ async function startServer(extraEnv?: Record<string, string>): Promise<ServerSta
   const parentPid = parseInt(process.env.BROWSE_PARENT_PID || '', 10) === 0 ? '0' : String(process.pid);
   let spawnedServer: { pid: number; startTime: string } | null = null;
 
-  if (IS_WINDOWS && NODE_SERVER_SCRIPT) {
+  if (server.runtime === 'node') {
     // Windows: Bun.spawn() + proc.unref() doesn't truly detach on Windows —
     // when the CLI exits, the server dies with it. Use Node's child_process.spawn
     // with { detached: true } instead, which is the gold standard for Windows
@@ -545,7 +703,7 @@ async function startServer(extraEnv?: Record<string, string>): Promise<ServerSta
       `const{spawn}=require('child_process');` +
       `const fs=require('fs');` +
       `let logFd;try{logFd=fs.openSync(${daemonLogPathStr},'a');}catch(e){logFd='ignore';}` +
-      `spawn(process.execPath,[${JSON.stringify(NODE_SERVER_SCRIPT)}],` +
+      `spawn(process.execPath,[${JSON.stringify(server.script)}],` +
       `{detached:true,windowsHide:true,stdio:['ignore',logFd,logFd],env:Object.assign({},process.env,` +
       `${extraEnvStr})}).unref()`;
     Bun.spawnSync(['node', '-e', launcherCode], { stdio: ['ignore', 'ignore', 'ignore'], windowsHide: true });
@@ -562,7 +720,7 @@ async function startServer(extraEnv?: Record<string, string>): Promise<ServerSta
     // (PPID=1, STAT=Ss) and survives the spawning shell's exit. Mirrors
     // the Windows path's rationale — same root cause, different OS API.
     const daemonLogFd = openDaemonLogSink();
-    const child = nodeSpawn('bun', ['run', SERVER_SCRIPT], {
+    const child = nodeSpawn('bun', ['run', ...BUN_CHILD_FLAGS, server.script], {
       detached: true,
       windowsHide: true,
       stdio: ['ignore', daemonLogFd, daemonLogFd],
@@ -597,7 +755,7 @@ async function startServer(extraEnv?: Record<string, string>): Promise<ServerSta
 
   if (spawnedServer?.startTime) {
     const { pid, startTime } = spawnedServer;
-    const stillOurs = () => readPidStartTime(pid) === startTime && readPidCmdline(pid).split(/\s+/).includes(SERVER_SCRIPT);
+    const stillOurs = () => readPidStartTime(pid) === startTime && readPidCmdline(pid).split(/\s+/).includes(server.script);
     if (stillOurs()) {
       safeKill(pid, 'SIGTERM');
       const deadline = Date.now() + 500;
@@ -706,8 +864,15 @@ async function ensureServer(flags?: GlobalFlags): Promise<ServerState> {
     // hint. No silent restart — that would drop tab state, cookies, and
     // logged-in sessions without warning.
     if (desiredHash && state.configHash && state.configHash !== desiredHash) {
-      console.error(`[browse] existing daemon has different config (proxy/headed mismatch).`);
-      console.error(`[browse] run 'browse disconnect' first to apply --proxy/--headed.`);
+      // #3030: a caller that passed no flags never asked to "apply" any.
+      if (flags?.proxyUrl || flags?.headed) {
+        console.error(`[browse] existing daemon has different config (proxy/headed mismatch).`);
+        console.error(`[browse] run 'browse disconnect' first to apply --proxy/--headed.`);
+      } else {
+        console.error(`[browse] a browse daemon for this project is running with --headed/--proxy (started by another session).`);
+        console.error(`[browse] pass the same flags to use it, or run 'browse disconnect' to start a plain one.`);
+        console.error(`[browse] why: BROWSER.md, "Daemon discipline": https://github.com/garrytan/gstack/blob/main/BROWSER.md#headed-mode--proxy--browser-native-downloads-v12800`);
+      }
       process.exit(1);
     }
     // Same path: existing daemon is plain (no flags) but caller passes
@@ -1509,7 +1674,48 @@ async function handlePairAgent(state: ServerState, args: string[]): Promise<void
 }
 
 // ─── Main ──────────────────────────────────────────────────────
+/**
+ * #494: the CLI talks to its daemon over loopback, but Bun's fetch sends those
+ * calls through HTTP(S)_PROXY, so the daemon never looks healthy behind a
+ * corporate proxy. Append the loopback names to the user's NO_PROXY (never
+ * replace it). Bun reads NO_PROXY when the first fetch runs, so this must run
+ * before any fetch. The daemon inherits the same value.
+ */
+export const CHAIN_NO_FLOW_ANCHOR = 'https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#browse-chain-no-flow';
+
+/**
+ * The flow `browse chain` runs when it has no arguments: stdin, read only when
+ * it is not a terminal. A terminal, empty input or a read error (EAGAIN, EOF)
+ * is a usage error.
+ */
+export function readChainFlow(isTTY: boolean, readStdin: () => string): { ok: true; flow: string } | { ok: false; error: string } {
+  let cause = 'stdin is a terminal';
+  if (!isTTY) {
+    try {
+      const flow = readStdin().trim();
+      if (flow) return { ok: true, flow };
+      cause = 'stdin was empty';
+    } catch (err: any) {
+      cause = `stdin could not be read (${err?.code ?? err?.message ?? String(err)})`;
+    }
+  }
+  return {
+    ok: false,
+    error: `[browse] chain: no flow to run (${cause}).\n` +
+      'Usage: echo \'[["goto","url"],["text"]]\' | browse chain\n' +
+      '   or: browse chain \'goto url | click @e5 | snapshot -ic\'\n' +
+      CHAIN_NO_FLOW_ANCHOR,
+  };
+}
+
+export function withLoopbackNoProxy(env: Record<string, string | undefined>): string {
+  const entries = (env.NO_PROXY ?? env.no_proxy ?? '').split(',').map(e => e.trim()).filter(Boolean);
+  for (const host of ['127.0.0.1', 'localhost', '::1']) if (!entries.includes(host)) entries.push(host);
+  return entries.join(',');
+}
+
 async function main() {
+  process.env.NO_PROXY = process.env.no_proxy = withLoopbackNoProxy(process.env);
   const rawArgs = process.argv.slice(2);
 
   // ─── Global flags (--proxy, --headed) ───────────────────────
@@ -1537,7 +1743,7 @@ Usage: browse <command> [args...]
 Navigation:     goto <url> | back | forward | reload | url
 Content:        text | html [sel] | links | forms | accessibility
 Interaction:    click <sel> | fill <sel> <val> | select <sel> <val>
-                hover <sel> | type <text> | press <key>
+                hover <sel> | type [--selector <sel>] <text> | press <key>
                 scroll [sel] | wait <sel|--networkidle|--load> | viewport <WxH>
                 upload <sel> <file1> [file2...]
                 cookie-import <json-file>
@@ -1557,6 +1763,7 @@ Multi-step:     chain (reads JSON from stdin)
 Tabs:           tabs | tab <id> | newtab [url] | closetab [id]
 Server:         status | cookie <n>=<v> | header <n>:<v>
                 useragent <str> | stop | restart
+                profiles [list] | profiles prune [--days N]  (per-project headed profiles)
                 tunnel revoke <name> | tunnel agents  (paired-agent tokens)
                 --force-restart: replace a live-but-busy daemon (any command;
                 LOSES tabs/cookies/logins — never done automatically)
@@ -1573,6 +1780,8 @@ Refs:           After 'snapshot', use @e1, @e2... as selectors:
 
   const command = args[0];
   const commandArgs = args.slice(1);
+
+  if (command === 'profiles') process.exit(runProfilesCommand(commandArgs));
 
   // ─── Headed Connect (pre-server command) ────────────────────
   // connect must be handled BEFORE ensureServer() because it needs
@@ -1640,22 +1849,7 @@ Refs:           After 'snapshot', use @e1, @e2... as selectors:
     console.log('Launching headed Chromium with extension + terminal agent...');
     try {
       // Start server in headed mode with extension auto-loaded
-      // Use a well-known port so the Chrome extension auto-connects
-      const serverEnv: Record<string, string> = {
-        BROWSE_HEADED: '1',
-        BROWSE_PORT: '34567',
-        // Disable parent-process watchdog: the user controls the headed browser
-        // window lifecycle. The CLI exits immediately after connect, so watching
-        // it would kill the server ~15s later. Cleanup happens via browser
-        // disconnect event or $B disconnect.
-        BROWSE_PARENT_PID: '0',
-        // Apply --proxy from this invocation if present. Without this,
-        // `browse --proxy <url> connect` would launch headed Chromium
-        // bypassing the SOCKS bridge entirely.
-        ...(globalFlags.proxyUrl ? { BROWSE_PROXY_URL: globalFlags.proxyUrl } : {}),
-        ...(globalFlags.configHash ? { BROWSE_CONFIG_HASH: globalFlags.configHash } : {}),
-      };
-      const newState = await startServer(serverEnv);
+      const newState = await startServer(buildHeadedServerEnv(globalFlags));
 
       // Print connected status
       const resp = await fetch(`http://127.0.0.1:${newState.port}/command`, {
@@ -1737,58 +1931,31 @@ Refs:           After 'snapshot', use @e1, @e2... as selectors:
     process.on('SIGINT', () => teardownAndExit('SIGINT'));
     process.on('SIGTERM', () => teardownAndExit('SIGTERM'));
 
-    const SUPERVISOR_TICK_MS = parseInt(
-      process.env.GSTACK_SUPERVISOR_TICK_MS || '30000',
-      10,
-    );
-    const SUPERVISOR_GUARD_WINDOW_MS = 5 * 60_000;
-    const SUPERVISOR_GUARD_MAX = 5;
-    const SUPERVISOR_BACKOFF_MS = (process.env.GSTACK_SUPERVISOR_BACKOFF || '1000,2000,4000,8000,30000')
-      .split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n));
-    const respawns: number[] = [];
-
-    while (!supervisorExiting) {
-      await new Promise(resolve => setTimeout(resolve, SUPERVISOR_TICK_MS));
-      if (supervisorExiting) break;
-      const state = readState();
-      if (state?.pid && isProcessAlive(state.pid)) continue;
-      // Server died. Prune rolling window and check guard.
-      const now = Date.now();
-      while (respawns.length && now - respawns[0] > SUPERVISOR_GUARD_WINDOW_MS) {
-        respawns.shift();
-      }
-      if (respawns.length >= SUPERVISOR_GUARD_MAX) {
-        console.error(
-          `[browse] Supervisor: ${SUPERVISOR_GUARD_MAX} crashes in ${SUPERVISOR_GUARD_WINDOW_MS / 1000}s — giving up.`,
-        );
-        process.exit(1);
-      }
-      const attempt = respawns.length;
-      respawns.push(now);
-      const backoff = SUPERVISOR_BACKOFF_MS[Math.min(attempt, SUPERVISOR_BACKOFF_MS.length - 1)] ?? 30_000;
-      console.warn(`[browse] Supervisor: server PID gone — respawning in ${backoff}ms (attempt ${attempt + 1}/${SUPERVISOR_GUARD_MAX})...`);
-      await new Promise(resolve => setTimeout(resolve, backoff));
-      if (supervisorExiting) break;
-      try {
-        const respawned = await startServer(serverEnv);
-        console.log(`[browse] Supervisor: server respawned (PID ${respawned.pid}, port ${respawned.port}).`);
-        // Re-spawn the terminal-agent too; same env wiring as the initial connect.
-        try {
-          spawnTerminalAgent({
-            stateFile: config.stateFile,
-            serverPort: respawned.port,
-            ownerPid: respawned.pid,
-            cwd: config.projectDir,
-          });
-        } catch (err: any) {
-          console.warn(`[browse] Supervisor: terminal-agent respawn failed: ${err?.message || err}`);
-        }
-      } catch (err: any) {
-        console.error(`[browse] Supervisor: server respawn failed: ${err?.message || err}`);
-        // Let the next tick try again — the crash-loop guard already
-        // bounded the retries via the rolling window.
-      }
-    }
+    const outcome = await runHeadedSupervisor({
+      env: buildHeadedServerEnv(globalFlags),
+      tickMs: parseInt(process.env.GSTACK_SUPERVISOR_TICK_MS || '30000', 10),
+      backoffMs: (process.env.GSTACK_SUPERVISOR_BACKOFF || '1000,2000,4000,8000,30000')
+        .split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n)),
+      daemonLog: daemonLogPath(),
+      readState,
+      isProcessAlive,
+      startServer,
+      spawnTerminalAgent: (respawned) => {
+        spawnTerminalAgent({
+          stateFile: config.stateFile,
+          serverPort: respawned.port,
+          ownerPid: respawned.pid,
+          cwd: config.projectDir,
+        });
+      },
+      sleep: (ms) => new Promise(resolve => setTimeout(resolve, ms)),
+      now: Date.now,
+      isExiting: () => supervisorExiting,
+      log: (line) => console.log(line),
+      warn: (line) => console.warn(line),
+      error: (line) => console.error(line),
+    });
+    if (outcome === 'gave_up') process.exit(1);
     process.exit(0);
   }
 
@@ -1923,10 +2090,18 @@ Refs:           After 'snapshot', use @e1, @e2... as selectors:
     await handleTunnel(commandArgs); // always exits
   }
 
-  // Special case: chain reads from stdin
+  // Special case: chain reads from stdin. Synchronously: on Windows an awaited
+  // Bun.stdin.text() inside this un-awaited main() did not keep the event loop
+  // alive, so a piped flow exited 0 with nothing sent to the daemon (#3039).
+  // No flow (a terminal, empty input, an unreadable stdin) is a usage error
+  // before ensureServer(): it never boots a daemon.
   if (command === 'chain' && commandArgs.length === 0) {
-    const stdin = await Bun.stdin.text();
-    commandArgs.push(stdin.trim());
+    const flow = readChainFlow(Boolean(process.stdin.isTTY), () => fs.readFileSync(0, 'utf8'));
+    if (!flow.ok) {
+      console.error(flow.error);
+      process.exit(1);
+    }
+    commandArgs.push(flow.flow);
   }
 
   // #2219 IRON RULE (pair-agent leg): capture whether a LIVE daemon predates
@@ -2000,7 +2175,12 @@ Refs:           After 'snapshot', use @e1, @e2... as selectors:
   // Playwright — but on macOS 26 the GPU process can survive that close and
   // spin at ~800% CPU forever. The state snapshot read above still carries
   // the launched child's identity; reap a verified survivor.
+  // Reap only after the daemon has finished its own shutdown: killing Chromium
+  // while the daemon is still closing reads as a crash, and the daemon exits(1)
+  // without removing its state file.
   if (command === 'stop') {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && isProcessAlive(state.pid)) await Bun.sleep(100);
     await reapRecordedChromium(state);
   }
 

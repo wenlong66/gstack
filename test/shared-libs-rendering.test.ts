@@ -54,8 +54,14 @@ describe('shared-code skill distribution', () => {
       expect(standalone).toContain('including repeated page numbers');
       expect(standalone).toContain('temporary files and files outside the repository');
       expect(standalone).toContain('Keep API responses and intermediate data on stdout or in memory');
-      expect(standalone).toContain('--no-lazy-fetch');
-      expect(standalone).toContain('log.showSignature=false');
+      // Git safety is the installed helper from the trusted global runtime, not a retyped prefix.
+      const safeGit = `~/${host.globalRoot}/bin/gstack-safe-git`;
+      expect(standalone).toContain(`${safeGit} -C <repo> rev-parse --is-inside-work-tree`);
+      expect(standalone).toContain(`${safeGit} ls-files --cached --others --exclude-standard -z`);
+      expect(standalone).toContain('never bare `git`');
+      expect(standalone).not.toContain('git --no-pager');
+      expect(standalone).not.toContain('$GSTACK_ROOT');
+      expect(standalone).not.toContain('{{SAFE_GIT}}');
       expect(standalone).toContain('python3 -I -S');
       expect(standalone).toContain('two explicit committed object IDs');
       expect(standalone).toContain('same Git tree');
@@ -148,6 +154,15 @@ describe('shared-code skill distribution', () => {
       const damaged = source.replace(marker, '## Missing prerequisite');
       expect(() => sharedLibsPlanExcerpt(source === entrypoint ? damaged : entrypoint,
         source === review ? damaged : review)).toThrow(/marker not found/);
+    }
+  });
+
+  test('every rendered recommendation names a concrete risk, never "none"', () => {
+    // C3: shared-libs-opportunity-judgment reds 37193478719 t3 and 37195203538 t1 wrote
+    // "Main risk: none found inside the repo" / "none in behavior" for the top recommendation.
+    for (const host of ALL_HOST_CONFIGS) {
+      const text = rendered(host, 'deslop-shared-libs').replace(/\s+/g, ' ');
+      expect(text, host.name).toContain('name the main risk or uncertainty: a concrete behavior that could differ after migration, or the shared-failure blast radius, never "none".');
     }
   });
 

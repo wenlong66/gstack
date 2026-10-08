@@ -16,11 +16,13 @@ import { describe, test, expect } from 'bun:test';
 import type { TemplateContext } from '../scripts/resolvers/types';
 import { HOST_PATHS } from '../scripts/resolvers/types';
 import { generatePreamble } from '../scripts/resolvers/preamble';
+import { generatePreambleBash } from '../scripts/resolvers/preamble/generate-preamble-bash';
+import { insertRuntimePreludes, runtimeRootPrelude } from '../scripts/resolvers/runtime-root';
 
 function makeCtx(
   host: 'claude' | 'codex' | 'factory',
   tier: 1 | 2 | 3 | 4,
-  model?: string,
+  model?: TemplateContext['model'],
 ): TemplateContext {
   return {
     skillName: 'test-skill',
@@ -71,25 +73,45 @@ describe('Preamble composition order', () => {
   });
 });
 
-describe('Conductor signal (preamble bash)', () => {
-  test('claude preamble emits CONDUCTOR_SESSION, gated on != headless (Issue 8)', () => {
+describe('Conductor signal (skill-start script)', () => {
+  // Token-reduction Phase 1 moved the preamble bash into bin/gstack-skill-start;
+  // the Issue-8 invariant (CONDUCTOR_SESSION emitted, gated on != headless so
+  // eval/CI inside Conductor BLOCKs instead of rendering prose to nobody)
+  // lives in the script now. The render must still invoke the script and the
+  // AUQ prose still branches on the echoed line.
+  test('skill-start script emits CONDUCTOR_SESSION, gated on != headless (Issue 8)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const script = fs.readFileSync(path.join(import.meta.dir, '..', 'bin', 'gstack-skill-start'), 'utf-8');
+    expect(script).toContain('echo "CONDUCTOR_SESSION: true"');
+    expect(script).toMatch(/"\$_SESSION_KIND" != "headless"[\s\S]*CONDUCTOR_WORKSPACE_PATH[\s\S]*CONDUCTOR_PORT[\s\S]*CONDUCTOR_SESSION: true/);
+    // #2733: spawned outranks Conductor — a spawned session inside a Conductor
+    // workspace auto-chooses instead of rendering prose to nobody.
+    expect(script).toMatch(/"\$_SESSION_KIND" != "headless"[\s\S]{0,80}"\$_SESSION_KIND" != "spawned"[\s\S]{0,200}CONDUCTOR_SESSION: true/);
+  });
+
+  test('claude preamble render invokes the script and interprets CONDUCTOR_SESSION', () => {
     const out = generatePreamble(makeCtx('claude', 2, 'claude'));
-    expect(out).toContain('echo "CONDUCTOR_SESSION: true"');
-    // The emission must be suppressed when the session is headless (eval/CI
-    // inside Conductor must BLOCK, not render prose to nobody).
-    expect(out).toMatch(/"\$_SESSION_KIND" != "headless"[\s\S]*CONDUCTOR_WORKSPACE_PATH[\s\S]*CONDUCTOR_PORT[\s\S]*CONDUCTOR_SESSION: true/);
+    expect(out).toContain('gstack-skill-start');
+    // The AUQ tool-resolution prose keys off the echoed line.
+    expect(out).toContain('CONDUCTOR_SESSION: true');
   });
 
-  test('codex preamble can resolve runtime root from Codex plugin cache', () => {
-    const out = generatePreamble(makeCtx('codex', 1, 'claude'));
-    expect(out).toContain('GSTACK_ROOT="${GSTACK_ROOT:-$HOME/.codex/skills/gstack}"');
-    expect(out).toContain('"$HOME/.codex/plugins/cache"/*/gstack/*/skills/gstack');
-    expect(out).toContain('[ -x "$_GSTACK_CAND/bin/gstack-config" ] && GSTACK_ROOT="$_GSTACK_CAND" && break');
+  test('codex preamble uses the shared cache-aware root without duplicating it', () => {
+    const ctx = makeCtx('codex', 1, 'claude');
+    const out = generatePreambleBash(ctx);
+    expect(out).toContain(runtimeRootPrelude(ctx));
+    expect(out).toContain('/plugins/cache"/*/gstack/*/skills/gstack');
+    expect(out).toContain('"$GSTACK_BIN/gstack-skill-start" --skill "test-skill" --model "claude"');
+    expect(out.split('gstack: no install found')).toHaveLength(2);
+    expect(insertRuntimePreludes(out, ctx)).toBe(out);
   });
 
-  test('non-Codex env-var hosts do not scan Codex plugin cache', () => {
-    const out = generatePreamble(makeCtx('factory', 1, 'claude'));
-    expect(out).toContain('GSTACK_ROOT="${GSTACK_ROOT:-$HOME/.factory/skills/gstack}"');
-    expect(out).not.toContain('.codex/plugins/cache');
+  test('non-Codex env-var hosts use the shared root without scanning Codex plugin cache', () => {
+    const ctx = makeCtx('factory', 1, 'claude');
+    const out = generatePreamble(ctx);
+    expect(out).toContain(runtimeRootPrelude(ctx));
+    expect(out).toContain('.factory/skills/gstack');
+    expect(out).not.toContain('/plugins/cache');
   });
 });
